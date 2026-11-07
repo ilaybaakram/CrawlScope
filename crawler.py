@@ -8,11 +8,35 @@ import httpx
 from bs4 import BeautifulSoup
 
 
+def check_link(url: str, headers: dict[str, str]) -> tuple[int | None, str | None]:
+    """Return (status_code, error) for a link without following redirects."""
+    try:
+        response = httpx.head(url, headers=headers, timeout=10.0)
+        if response.status_code in (405, 501):
+            # Some servers do not support HEAD, so fall back to GET without
+            # downloading the response body.
+            with httpx.stream("GET", url, headers=headers, timeout=10.0) as get_response:
+                return get_response.status_code, None
+        return response.status_code, None
+    except httpx.RequestError as error:
+        return None, str(error)
+
+
+def classify_link(status_code: int | None, error: str | None) -> str:
+    if error is not None or status_code is None:
+        return "error"
+    if status_code >= 400:
+        return "broken"
+    return "working"
+
+
 def crawl_website(
     start_url: str,
     max_pages: int = 10,
     delay_seconds: float = 1.0,
     max_depth: int = 2,
+    max_link_checks: int = 50,
+    link_results: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     clean_start_url, _ = urldefrag(start_url)
     queue = deque([(clean_start_url, 0)])
@@ -20,6 +44,10 @@ def crawl_website(
     visited = set()
     pages_crawled = 0
     results = []
+    if link_results is None:
+        link_results = []
+    checked_links = set()
+    link_requests_made = 0
 
     parsed_start_url = urlparse(clean_start_url)
     target_hostname = parsed_start_url.hostname
@@ -114,31 +142,79 @@ def crawl_website(
             print(f"    Total Links: {total_links}")
             print(f"    Content-Type: {content_type}")
 
+            anchor_tags = soup.find_all("a")
+            discovered_urls = set()
+
+            for tag in anchor_tags:
+                href = tag.get("href")
+                if href is None:
+                    continue
+
+                absolute_url = urljoin(current_url, href)
+                clean_url, _ = urldefrag(absolute_url)
+                parsed_url = urlparse(clean_url)
+
+                if parsed_url.scheme not in ("http", "https"):
+                    continue
+
+                if parsed_url.hostname != target_hostname:
+                    continue
+
+                discovered_urls.add(clean_url)
+
             if current_depth < max_depth:
-                anchor_tags = soup.find_all("a")
-                discovered_urls = set()
-
-                for tag in anchor_tags:
-                    href = tag.get("href")
-                    if href is None:
-                        continue
-
-                    absolute_url = urljoin(current_url, href)
-                    clean_url, _ = urldefrag(absolute_url)
-                    parsed_url = urlparse(clean_url)
-
-                    if parsed_url.scheme not in ("http", "https"):
-                        continue
-
-                    if parsed_url.hostname != target_hostname:
-                        continue
-
-                    discovered_urls.add(clean_url)
-
                 for next_url in discovered_urls:
                     if next_url not in visited and next_url not in queued_urls:
                         queued_urls.add(next_url)
                         queue.append((next_url, current_depth + 1))
+
+            # Link checking is separate from crawling: it never adds pages to
+            # the queue and never counts toward max_pages.
+            crawled_pages = {item["url"]: item for item in results}
+
+            for link_url in sorted(discovered_urls):
+                if link_url in checked_links:
+                    continue
+
+                if link_url in crawled_pages:
+                    status_code = crawled_pages[link_url]["status_code"]
+                    error = crawled_pages[link_url]["error"] if status_code is None else None
+                elif not robot_parser.can_fetch(user_agent, link_url):
+                    checked_links.add(link_url)
+                    link_results.append(
+                        {
+                            "url": link_url,
+                            "found_on": current_url,
+                            "status_code": None,
+                            "result": "skipped",
+                            "error": "Disallowed by robots.txt",
+                        }
+                    )
+                    print(f"    Link skipped (disallowed by robots.txt): {link_url}")
+                    continue
+                else:
+                    if link_requests_made >= max_link_checks:
+                        break
+                    if delay_seconds > 0:
+                        time.sleep(delay_seconds)
+                    link_requests_made += 1
+                    status_code, error = check_link(link_url, headers)
+
+                checked_links.add(link_url)
+                link_result = classify_link(status_code, error)
+                link_results.append(
+                    {
+                        "url": link_url,
+                        "found_on": current_url,
+                        "status_code": status_code,
+                        "result": link_result,
+                        "error": error,
+                    }
+                )
+                print(
+                    f"    Link {link_result.upper()}: {link_url} "
+                    f"| Status: {status_code}"
+                )
 
         except httpx.RequestError as error:
             results.append(
@@ -183,6 +259,10 @@ def crawl_website(
     print(
         f"\nCrawl complete. Total attempted requests: {len(results)} "
         f"| Successful pages: {successful_pages}"
+    )
+    broken_links = sum(1 for item in link_results if item["result"] == "broken")
+    print(
+        f"Links checked: {len(link_results)} | Broken links: {broken_links}"
     )
 
     return results
