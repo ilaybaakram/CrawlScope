@@ -69,6 +69,14 @@ SAMPLE_PAGE = {
             "url": "https://example.com/",
             "canonical_url": "https://other.org/canonical",
         },
+        {
+            "type": "noindex_page",
+            "severity": "warning",
+            "message": "Page blocks search engine indexing via meta_robots: noindex, follow",
+            "url": "https://example.com/",
+            "robots_directive": "noindex, follow",
+            "directive_source": "meta_robots",
+        },
     ],
     "error": None,
 }
@@ -144,7 +152,16 @@ class FastAPIEndpointTests(unittest.TestCase):
                 "underscore_url",
                 "redirect_chain",
                 "cross_domain_canonical",
+                "noindex_page",
             ],
+        )
+        self.assertEqual(
+            data["pages"][0]["seo_issues"][7]["robots_directive"],
+            "noindex, follow",
+        )
+        self.assertEqual(
+            data["pages"][0]["seo_issues"][7]["directive_source"],
+            "meta_robots",
         )
         self.assertEqual(
             data["pages"][0]["seo_issues"][6]["canonical_url"],

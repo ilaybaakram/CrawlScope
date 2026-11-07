@@ -454,6 +454,7 @@ function App() {
                   <th>Issue Type</th>
                   <th>Severity</th>
                   <th>Canonical URL</th>
+                  <th>Robots Directive</th>
                   <th>Source URL</th>
                   <th>Destination URL</th>
                   <th>Redirect Chain</th>
@@ -465,7 +466,7 @@ function App() {
               <tbody>
                 {seoIssues.map((issue) => (
                   <tr
-                    key={`${issue.url}-${issue.type}-${issue.canonical_url || ""}-${issue.image_url || ""}-${issue.source_url || ""}`}
+                    key={`${issue.url}-${issue.type}-${issue.canonical_url || ""}-${issue.robots_directive || ""}-${issue.directive_source || ""}-${issue.image_url || ""}-${issue.source_url || ""}`}
                   >
                     <td className="url-cell">
                       <a
@@ -506,6 +507,13 @@ function App() {
                         ) : (
                           <code>{issue.canonical_url}</code>
                         )
+                      ) : (
+                        "—"
+                      )}
+                    </td>
+                    <td>
+                      {issue.robots_directive ? (
+                        <code>{issue.robots_directive}</code>
                       ) : (
                         "—"
                       )}

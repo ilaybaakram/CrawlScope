@@ -1256,6 +1256,178 @@ class CanonicalSeoAuditTests(unittest.TestCase):
         self.assertEqual(head_calls, [])
 
 
+class RobotsSeoAuditTests(unittest.TestCase):
+    def crawl_page_with_robots(
+        self,
+        meta_tags: str = "",
+        x_robots_headers: str | list[str] | None = None,
+        content_type: str = "text/html; charset=utf-8",
+    ):
+        html = (
+            f"<html><head><title>Page Title</title>"
+            f'<meta name="description" content="Page description">'
+            f'<link rel="canonical" href="{START_URL}">'
+            f"{meta_tags}</head>"
+            f"<body><h1>Page Heading</h1></body></html>"
+        )
+        headers: list[tuple[str, str]] = [("content-type", content_type)]
+        if isinstance(x_robots_headers, str):
+            headers.append(("X-Robots-Tag", x_robots_headers))
+        elif isinstance(x_robots_headers, list):
+            for header_val in x_robots_headers:
+                headers.append(("X-Robots-Tag", header_val))
+
+        def fake_get(url, **_):
+            if url.endswith("/robots.txt"):
+                return make_response("GET", url, 200, ROBOTS_TXT)
+            return httpx.Response(
+                200,
+                text=html,
+                headers=headers,
+                request=httpx.Request("GET", url),
+            )
+
+        with patch("crawler.httpx.get", side_effect=fake_get), \
+             patch("crawler.time.sleep"):
+            pages = crawler.crawl_website(START_URL, max_pages=1, max_depth=0)
+        return pages[0]
+
+    def test_clean_indexable_page_produces_no_robots_issues(self):
+        page_default = self.crawl_page_with_robots("")
+        self.assertEqual(page_default["seo_issues"], [])
+
+        page_index_follow = self.crawl_page_with_robots(
+            '<meta name="robots" content="index, follow">'
+        )
+        self.assertEqual(page_index_follow["seo_issues"], [])
+
+        page_all = self.crawl_page_with_robots(
+            '<meta name="robots" content="all, max-snippet:-1">'
+        )
+        self.assertEqual(page_all["seo_issues"], [])
+
+    def test_meta_robots_noindex_is_detected(self):
+        page = self.crawl_page_with_robots(
+            '<meta name="robots" content="noindex, follow">'
+        )
+        self.assertEqual(len(page["seo_issues"]), 1)
+        issue = page["seo_issues"][0]
+        self.assertEqual(issue["type"], "noindex_page")
+        self.assertEqual(issue["severity"], "warning")
+        self.assertEqual(issue["url"], START_URL)
+        self.assertEqual(issue["robots_directive"], "noindex, follow")
+        self.assertEqual(issue["directive_source"], "meta_robots")
+        self.assertIn("noindex, follow", issue["message"])
+
+    def test_meta_robots_nofollow_is_detected(self):
+        page = self.crawl_page_with_robots(
+            '<meta name="robots" content="index, nofollow">'
+        )
+        self.assertEqual(len(page["seo_issues"]), 1)
+        issue = page["seo_issues"][0]
+        self.assertEqual(issue["type"], "nofollow_page")
+        self.assertEqual(issue["severity"], "warning")
+        self.assertEqual(issue["url"], START_URL)
+        self.assertEqual(issue["robots_directive"], "index, nofollow")
+        self.assertEqual(issue["directive_source"], "meta_robots")
+
+    def test_meta_robots_none_triggers_noindex_and_nofollow(self):
+        page = self.crawl_page_with_robots(
+            '<meta name="robots" content="none">'
+        )
+        issue_types = [issue["type"] for issue in page["seo_issues"]]
+        self.assertEqual(issue_types, ["noindex_page", "nofollow_page"])
+        for issue in page["seo_issues"]:
+            self.assertEqual(issue["robots_directive"], "none")
+            self.assertEqual(issue["directive_source"], "meta_robots")
+
+    def test_googlebot_and_case_insensitive_directives_are_detected(self):
+        page = self.crawl_page_with_robots(
+            '<meta name="GOOGLEBOT" content="NOINDEX">'
+        )
+        self.assertEqual(len(page["seo_issues"]), 1)
+        issue = page["seo_issues"][0]
+        self.assertEqual(issue["type"], "noindex_page")
+        self.assertEqual(issue["robots_directive"], "NOINDEX")
+        self.assertEqual(issue["directive_source"], "meta_googlebot")
+
+    def test_x_robots_tag_header_directives_are_detected(self):
+        page = self.crawl_page_with_robots(
+            x_robots_headers="googlebot: noindex, nofollow"
+        )
+        issue_types = [issue["type"] for issue in page["seo_issues"]]
+        self.assertEqual(issue_types, ["noindex_page", "nofollow_page"])
+        for issue in page["seo_issues"]:
+            self.assertEqual(issue["directive_source"], "x_robots_tag")
+            self.assertEqual(
+                issue["robots_directive"], "googlebot: noindex, nofollow"
+            )
+
+    def test_conflicting_robots_directives_within_tag_and_across_sources(self):
+        single_tag_page = self.crawl_page_with_robots(
+            '<meta name="robots" content="index, noindex">'
+        )
+        single_types = [issue["type"] for issue in single_tag_page["seo_issues"]]
+        self.assertEqual(
+            single_types,
+            ["conflicting_robots_directives", "noindex_page"],
+        )
+        conflict_issue = single_tag_page["seo_issues"][0]
+        self.assertEqual(conflict_issue["severity"], "warning")
+        self.assertIn("index vs noindex", conflict_issue["message"])
+
+        cross_source_page = self.crawl_page_with_robots(
+            meta_tags='<meta name="robots" content="index, follow">',
+            x_robots_headers="noindex, nofollow",
+        )
+        cross_types = [issue["type"] for issue in cross_source_page["seo_issues"]]
+        self.assertEqual(
+            cross_types,
+            ["conflicting_robots_directives", "noindex_page", "nofollow_page"],
+        )
+        self.assertEqual(
+            cross_source_page["seo_issues"][0]["directive_source"],
+            "meta_robots, x_robots_tag",
+        )
+
+    def test_multiple_meta_robots_tags_are_detected(self):
+        page = self.crawl_page_with_robots(
+            '<meta name="robots" content="index">'
+            '<meta name="robots" content="nofollow">'
+        )
+        issue_types = [issue["type"] for issue in page["seo_issues"]]
+        self.assertEqual(
+            issue_types,
+            ["multiple_meta_robots", "nofollow_page"],
+        )
+        mult_issue = page["seo_issues"][0]
+        self.assertEqual(mult_issue["severity"], "warning")
+        self.assertEqual(mult_issue["robots_directive"], "index | nofollow")
+        self.assertEqual(mult_issue["directive_source"], "meta_robots")
+
+    def test_empty_or_missing_meta_robots_content_is_detected(self):
+        for tag in (
+            '<meta name="robots" content="">',
+            '<meta name="robots" content="   ">',
+            '<meta name="robots">',
+        ):
+            page = self.crawl_page_with_robots(tag)
+            self.assertEqual(len(page["seo_issues"]), 1)
+            issue = page["seo_issues"][0]
+            self.assertEqual(issue["type"], "empty_meta_robots")
+            self.assertEqual(issue["severity"], "warning")
+            self.assertIsNone(issue["robots_directive"])
+            self.assertEqual(issue["directive_source"], "meta_robots")
+
+    def test_non_html_page_is_excluded_from_robots_audit(self):
+        page = self.crawl_page_with_robots(
+            meta_tags='<meta name="robots" content="noindex">',
+            x_robots_headers="noindex, nofollow",
+            content_type="application/json",
+        )
+        self.assertEqual(page["seo_issues"], [])
+
+
 if __name__ == "__main__":
     unittest.main()
 

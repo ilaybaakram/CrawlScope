@@ -106,6 +106,14 @@ SAMPLE_PAGES = [
                 ],
                 "status_code": 200,
             },
+            {
+                "type": "noindex_page",
+                "severity": "warning",
+                "message": "Page blocks search engine indexing via meta_robots: noindex, follow",
+                "url": "https://example.com/café",
+                "robots_directive": "noindex, follow",
+                "directive_source": "meta_robots",
+            },
         ],
         "error": None,
     },
@@ -229,7 +237,7 @@ class PageExportTests(ExporterTestCase):
         self.assertIn("seo_issues", rows[0])
         self.assertEqual(json.loads(rows[0]["seo_issues"]), [])
         parsed_issues = json.loads(rows[2]["seo_issues"])
-        self.assertEqual(len(parsed_issues), 8)
+        self.assertEqual(len(parsed_issues), 9)
         self.assertEqual(parsed_issues[0]["type"], "missing_meta_description")
         self.assertEqual(parsed_issues[2]["type"], "duplicate_title")
         self.assertEqual(parsed_issues[3]["type"], "missing_image_alt")
@@ -250,6 +258,15 @@ class PageExportTests(ExporterTestCase):
         self.assertEqual(
             parsed_issues[7]["canonical_url"],
             "https://example.com/old-café",
+        )
+        self.assertEqual(parsed_issues[8]["type"], "noindex_page")
+        self.assertEqual(
+            parsed_issues[8]["robots_directive"],
+            "noindex, follow",
+        )
+        self.assertEqual(
+            parsed_issues[8]["directive_source"],
+            "meta_robots",
         )
 
         json_data = read_json(json_path)

@@ -627,6 +627,245 @@ def detect_canonical_seo_issues(
     return issues
 
 
+def _find_meta_robots_tags(soup: BeautifulSoup) -> list[tuple[str, Any]]:
+    robots_tags: list[tuple[str, Any]] = []
+    for tag in soup.find_all("meta"):
+        raw_name = tag.get("name")
+        if not isinstance(raw_name, str):
+            continue
+        bot_name = raw_name.strip().lower()
+        if bot_name in ("robots", "googlebot"):
+            robots_tags.append((bot_name, tag))
+    return robots_tags
+
+
+def _extract_x_robots_headers(response_headers: Any) -> list[str]:
+    if response_headers is None:
+        return []
+
+    values: list[str] = []
+    if hasattr(response_headers, "get_list"):
+        raw_list = response_headers.get_list("x-robots-tag")
+        for item in raw_list:
+            if item is not None and str(item).strip():
+                values.append(str(item).strip())
+        return values
+
+    if hasattr(response_headers, "items"):
+        for key, value in response_headers.items():
+            if str(key).strip().lower() != "x-robots-tag" or value is None:
+                continue
+            if isinstance(value, (list, tuple)):
+                for item in value:
+                    if item is not None and str(item).strip():
+                        values.append(str(item).strip())
+            elif str(value).strip():
+                values.append(str(value).strip())
+
+    return values
+
+
+def _parse_robots_directives(raw_value: str) -> set[str]:
+    parameterized_prefixes = {
+        "max-snippet",
+        "max-image-preview",
+        "max-video-preview",
+        "unavailable_after",
+    }
+    directives: set[str] = set()
+
+    for segment in raw_value.split(","):
+        token = segment.strip().lower()
+        if not token:
+            continue
+
+        if ":" in token:
+            prefix, _, remainder = token.partition(":")
+            prefix = prefix.strip()
+            remainder = remainder.strip()
+            if prefix not in parameterized_prefixes and remainder:
+                token = remainder
+
+        for part in token.split():
+            if part == "none":
+                directives.add("none")
+                directives.add("noindex")
+                directives.add("nofollow")
+            elif part == "all":
+                directives.add("all")
+                directives.add("index")
+                directives.add("follow")
+            else:
+                directives.add(part)
+
+    return directives
+
+
+def detect_robots_seo_issues(
+    url: str,
+    soup: BeautifulSoup,
+    content_type: str | None,
+    response_headers: Any = None,
+) -> list[dict[str, Any]]:
+    if not is_html_content(content_type):
+        return []
+
+    issues: list[dict[str, Any]] = []
+    meta_robots_tags = _find_meta_robots_tags(soup)
+    x_robots_values = _extract_x_robots_headers(response_headers)
+
+    tags_by_bot: dict[str, list[Any]] = {}
+    for bot_name, tag in meta_robots_tags:
+        tags_by_bot.setdefault(bot_name, []).append(tag)
+
+    for bot_name, tags in tags_by_bot.items():
+        if len(tags) > 1:
+            tag_values: list[str] = []
+            for tag in tags:
+                raw_content = tag.get("content")
+                cleaned = (
+                    str(raw_content).strip() if raw_content is not None else ""
+                )
+                tag_values.append(cleaned if cleaned else "(empty)")
+            combined_values = " | ".join(tag_values)
+            issues.append(
+                {
+                    "type": "multiple_meta_robots",
+                    "severity": "warning",
+                    "message": (
+                        f'Page has multiple <meta name="{bot_name}"> tags '
+                        f"({len(tags)}): {combined_values}"
+                    ),
+                    "url": url,
+                    "robots_directive": combined_values,
+                    "directive_source": f"meta_{bot_name}",
+                }
+            )
+
+    directive_entries: list[tuple[str, str, set[str]]] = []
+    seen_empty_sources: set[str] = set()
+
+    for bot_name, tag in meta_robots_tags:
+        source_name = f"meta_{bot_name}"
+        raw_content = tag.get("content")
+        cleaned_content = (
+            str(raw_content).strip() if raw_content is not None else ""
+        )
+        if not cleaned_content:
+            if source_name not in seen_empty_sources:
+                seen_empty_sources.add(source_name)
+                issues.append(
+                    {
+                        "type": "empty_meta_robots",
+                        "severity": "warning",
+                        "message": (
+                            f'Page has a <meta name="{bot_name}"> tag with '
+                            "an empty or missing content attribute."
+                        ),
+                        "url": url,
+                        "robots_directive": None,
+                        "directive_source": source_name,
+                    }
+                )
+            continue
+
+        parsed_tokens = _parse_robots_directives(cleaned_content)
+        directive_entries.append((source_name, cleaned_content, parsed_tokens))
+
+    for header_value in x_robots_values:
+        parsed_tokens = _parse_robots_directives(header_value)
+        directive_entries.append(("x_robots_tag", header_value, parsed_tokens))
+
+    if not directive_entries:
+        return issues
+
+    all_tokens: set[str] = set()
+    for _, _, tokens in directive_entries:
+        all_tokens.update(tokens)
+
+    conflicts: list[str] = []
+    if "index" in all_tokens and "noindex" in all_tokens:
+        conflicts.append("index vs noindex")
+    if "follow" in all_tokens and "nofollow" in all_tokens:
+        conflicts.append("follow vs nofollow")
+
+    if conflicts:
+        combined_directives = " | ".join(
+            raw_val for _, raw_val, _ in directive_entries
+        )
+        unique_sources = list(
+            dict.fromkeys(src for src, _, _ in directive_entries)
+        )
+        combined_source = ", ".join(unique_sources)
+        issues.append(
+            {
+                "type": "conflicting_robots_directives",
+                "severity": "warning",
+                "message": (
+                    f"Page has conflicting robots directives "
+                    f"({', '.join(conflicts)}): {combined_directives}"
+                ),
+                "url": url,
+                "robots_directive": combined_directives,
+                "directive_source": combined_source,
+            }
+        )
+
+    if "noindex" in all_tokens:
+        noindex_entries = [
+            (src, raw_val)
+            for src, raw_val, tokens in directive_entries
+            if "noindex" in tokens
+        ]
+        noindex_directive = " | ".join(raw_val for _, raw_val in noindex_entries)
+        noindex_sources = list(
+            dict.fromkeys(src for src, _ in noindex_entries)
+        )
+        noindex_source = ", ".join(noindex_sources)
+        issues.append(
+            {
+                "type": "noindex_page",
+                "severity": "warning",
+                "message": (
+                    f"Page blocks search engine indexing via {noindex_source}: "
+                    f"{noindex_directive}"
+                ),
+                "url": url,
+                "robots_directive": noindex_directive,
+                "directive_source": noindex_source,
+            }
+        )
+
+    if "nofollow" in all_tokens:
+        nofollow_entries = [
+            (src, raw_val)
+            for src, raw_val, tokens in directive_entries
+            if "nofollow" in tokens
+        ]
+        nofollow_directive = " | ".join(
+            raw_val for _, raw_val in nofollow_entries
+        )
+        nofollow_sources = list(
+            dict.fromkeys(src for src, _ in nofollow_entries)
+        )
+        nofollow_source = ", ".join(nofollow_sources)
+        issues.append(
+            {
+                "type": "nofollow_page",
+                "severity": "warning",
+                "message": (
+                    f"Page prevents search engines from following links via "
+                    f"{nofollow_source}: {nofollow_directive}"
+                ),
+                "url": url,
+                "robots_directive": nofollow_directive,
+                "directive_source": nofollow_source,
+            }
+        )
+
+    return issues
+
+
 def normalize_metadata_value(
     value: str | None,
     is_title: bool = False,
@@ -989,6 +1228,14 @@ def crawl_website(
                     crawled_pages=crawled_pages,
                     max_redirect_checks=max_redirect_checks,
                     delay_seconds=delay_seconds,
+                )
+            )
+            seo_issues.extend(
+                detect_robots_seo_issues(
+                    url=current_url,
+                    soup=soup,
+                    content_type=content_type,
+                    response_headers=response.headers,
                 )
             )
 
