@@ -1,3 +1,4 @@
+import json
 import time
 from collections import deque
 from pathlib import Path
@@ -866,6 +867,341 @@ def detect_robots_seo_issues(
     return issues
 
 
+def _find_json_ld_script_tags(soup: BeautifulSoup) -> list[Any]:
+    script_tags: list[Any] = []
+    for tag in soup.find_all("script"):
+        raw_type = tag.get("type")
+        if not isinstance(raw_type, str):
+            continue
+        mime_type = raw_type.split(";")[0].strip().lower()
+        if mime_type == "application/ld+json":
+            script_tags.append(tag)
+    return script_tags
+
+
+def _extract_and_validate_schema_type(
+    raw_type: Any,
+) -> tuple[list[str], str | None]:
+    if raw_type is None:
+        return [], "missing"
+
+    if isinstance(raw_type, str):
+        cleaned = raw_type.strip()
+        if not cleaned:
+            return [], "missing"
+        return [cleaned], None
+
+    if isinstance(raw_type, list):
+        if not raw_type:
+            return [], "missing"
+        cleaned_types: list[str] = []
+        for item in raw_type:
+            if not isinstance(item, str):
+                return [], "invalid_structure"
+            cleaned_item = item.strip()
+            if not cleaned_item:
+                return [], "missing"
+            cleaned_types.append(cleaned_item)
+        return cleaned_types, None
+
+    return [], "invalid_structure"
+
+
+def _normalize_schema_type_name(type_name: str) -> str:
+    cleaned = type_name.strip()
+    for prefix in ("https://schema.org/", "http://schema.org/"):
+        if cleaned.lower().startswith(prefix):
+            cleaned = cleaned[len(prefix) :]
+            break
+    return cleaned.casefold()
+
+
+def detect_structured_data_seo_issues(
+    url: str,
+    soup: BeautifulSoup,
+    content_type: str | None,
+) -> list[dict[str, Any]]:
+    if not is_html_content(content_type):
+        return []
+
+    script_tags = _find_json_ld_script_tags(soup)
+    if not script_tags:
+        return [
+            {
+                "type": "missing_structured_data",
+                "severity": "warning",
+                "message": (
+                    'Page is missing JSON-LD structured data '
+                    '(<script type="application/ld+json">).'
+                ),
+                "url": url,
+                "schema_types": [],
+            }
+        ]
+
+    issues: list[dict[str, Any]] = []
+    seen_issue_types: set[str] = set()
+    all_discovered_types: list[str] = []
+    top_level_type_counts: dict[str, int] = {}
+    top_level_type_labels: dict[str, str] = {}
+
+    def add_issue(
+        issue_type: str,
+        message: str,
+        schema_types: list[str] | None = None,
+    ) -> None:
+        if issue_type in seen_issue_types:
+            return
+        seen_issue_types.add(issue_type)
+        issues.append(
+            {
+                "type": issue_type,
+                "severity": "warning",
+                "message": message,
+                "url": url,
+                "schema_types": list(schema_types)
+                if schema_types is not None
+                else [],
+            }
+        )
+
+    def record_schema_types(
+        valid_types: list[str],
+        is_top_level: bool,
+    ) -> None:
+        for schema_type in valid_types:
+            if schema_type not in all_discovered_types:
+                all_discovered_types.append(schema_type)
+
+        if is_top_level:
+            seen_in_entity: set[str] = set()
+            for schema_type in valid_types:
+                normalized = _normalize_schema_type_name(schema_type)
+                if not normalized or normalized in seen_in_entity:
+                    continue
+                seen_in_entity.add(normalized)
+                top_level_type_counts[normalized] = (
+                    top_level_type_counts.get(normalized, 0) + 1
+                )
+                top_level_type_labels.setdefault(normalized, schema_type)
+
+    def inspect_object(
+        obj: dict[str, Any],
+        block_index: int,
+        is_top_level: bool,
+    ) -> None:
+        if not obj:
+            add_issue(
+                "invalid_schema_structure",
+                (
+                    f"JSON-LD script block #{block_index} contains an empty "
+                    "JSON object."
+                ),
+            )
+            return
+
+        if "@graph" in obj:
+            graph_value = obj["@graph"]
+            if not isinstance(graph_value, list) or len(graph_value) == 0:
+                add_issue(
+                    "invalid_schema_structure",
+                    (
+                        f"JSON-LD script block #{block_index} has an invalid "
+                        "'@graph' structure (must be a non-empty array of "
+                        "JSON objects)."
+                    ),
+                )
+                return
+
+            if any(
+                not isinstance(item, dict) or not item for item in graph_value
+            ):
+                add_issue(
+                    "invalid_schema_structure",
+                    (
+                        f"JSON-LD script block #{block_index} '@graph' array "
+                        "must contain only non-empty JSON objects."
+                    ),
+                )
+                return
+
+            if "@type" in obj:
+                valid_types, err_kind = _extract_and_validate_schema_type(
+                    obj.get("@type")
+                )
+                if err_kind == "missing":
+                    add_issue(
+                        "missing_schema_type",
+                        (
+                            f"JSON-LD object in script block #{block_index} "
+                            "has an empty '@type' property."
+                        ),
+                    )
+                elif err_kind == "invalid_structure":
+                    add_issue(
+                        "invalid_schema_structure",
+                        (
+                            f"JSON-LD object in script block #{block_index} "
+                            "has an invalid '@type' value (must be a string "
+                            "or array of strings)."
+                        ),
+                    )
+                else:
+                    record_schema_types(valid_types, is_top_level=True)
+
+            for graph_item in graph_value:
+                inspect_object(
+                    graph_item,
+                    block_index=block_index,
+                    is_top_level=True,
+                )
+            return
+
+        if not is_top_level and "@type" not in obj:
+            if "@value" in obj or set(obj.keys()) == {"@id"}:
+                return
+
+        if "@type" not in obj:
+            add_issue(
+                "missing_schema_type",
+                (
+                    f"JSON-LD object in script block #{block_index} is "
+                    "missing an '@type' property."
+                ),
+            )
+        else:
+            valid_types, err_kind = _extract_and_validate_schema_type(
+                obj.get("@type")
+            )
+            if err_kind == "missing":
+                add_issue(
+                    "missing_schema_type",
+                    (
+                        f"JSON-LD object in script block #{block_index} has "
+                        "an empty '@type' property."
+                    ),
+                )
+            elif err_kind == "invalid_structure":
+                add_issue(
+                    "invalid_schema_structure",
+                    (
+                        f"JSON-LD object in script block #{block_index} has "
+                        "an invalid '@type' value (must be a string or array "
+                        "of strings)."
+                    ),
+                )
+            else:
+                record_schema_types(valid_types, is_top_level=is_top_level)
+
+        for key, value in obj.items():
+            if str(key).startswith("@"):
+                continue
+            if isinstance(value, dict):
+                inspect_object(
+                    value,
+                    block_index=block_index,
+                    is_top_level=False,
+                )
+            elif isinstance(value, list):
+                for element in value:
+                    if isinstance(element, dict):
+                        inspect_object(
+                            element,
+                            block_index=block_index,
+                            is_top_level=False,
+                        )
+
+    for block_index, script_tag in enumerate(script_tags, start=1):
+        raw_content = (
+            script_tag.string
+            if script_tag.string is not None
+            else script_tag.get_text()
+        )
+        cleaned_content = (raw_content or "").strip()
+
+        if not cleaned_content:
+            add_issue(
+                "invalid_json_ld",
+                f"JSON-LD script block #{block_index} is empty.",
+            )
+            continue
+
+        try:
+            parsed_data = json.loads(cleaned_content)
+        except json.JSONDecodeError as error:
+            add_issue(
+                "invalid_json_ld",
+                (
+                    f"JSON-LD script block #{block_index} contains invalid "
+                    f"JSON: {error.msg}."
+                ),
+            )
+            continue
+
+        if isinstance(parsed_data, dict):
+            inspect_object(
+                parsed_data,
+                block_index=block_index,
+                is_top_level=True,
+            )
+        elif isinstance(parsed_data, list):
+            if not parsed_data:
+                add_issue(
+                    "invalid_schema_structure",
+                    (
+                        f"JSON-LD script block #{block_index} contains an "
+                        "empty JSON array."
+                    ),
+                )
+                continue
+
+            if any(not isinstance(item, dict) for item in parsed_data):
+                add_issue(
+                    "invalid_schema_structure",
+                    (
+                        f"JSON-LD script block #{block_index} array must "
+                        "contain only JSON objects."
+                    ),
+                )
+
+            for item in parsed_data:
+                if isinstance(item, dict):
+                    inspect_object(
+                        item,
+                        block_index=block_index,
+                        is_top_level=True,
+                    )
+        else:
+            add_issue(
+                "invalid_schema_structure",
+                (
+                    f"JSON-LD script block #{block_index} must be a JSON "
+                    "object or array of objects."
+                ),
+            )
+
+    duplicate_types = [
+        top_level_type_labels[norm_key]
+        for norm_key, count in top_level_type_counts.items()
+        if count > 1
+    ]
+    if duplicate_types:
+        add_issue(
+            "duplicate_schema_type",
+            (
+                "Multiple JSON-LD structured data blocks declare the same "
+                f"schema '@type': {', '.join(duplicate_types)}"
+            ),
+            schema_types=duplicate_types,
+        )
+
+    for issue in issues:
+        if not issue["schema_types"] and all_discovered_types and issue["type"] != "missing_structured_data":
+            issue["schema_types"] = list(all_discovered_types)
+
+    return issues
+
+
 def normalize_metadata_value(
     value: str | None,
     is_title: bool = False,
@@ -1236,6 +1572,13 @@ def crawl_website(
                     soup=soup,
                     content_type=content_type,
                     response_headers=response.headers,
+                )
+            )
+            seo_issues.extend(
+                detect_structured_data_seo_issues(
+                    url=current_url,
+                    soup=soup,
+                    content_type=content_type,
                 )
             )
 

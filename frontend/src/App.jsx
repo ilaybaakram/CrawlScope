@@ -455,6 +455,7 @@ function App() {
                   <th>Severity</th>
                   <th>Canonical URL</th>
                   <th>Robots Directive</th>
+                  <th>Schema Types</th>
                   <th>Source URL</th>
                   <th>Destination URL</th>
                   <th>Redirect Chain</th>
@@ -466,7 +467,7 @@ function App() {
               <tbody>
                 {seoIssues.map((issue) => (
                   <tr
-                    key={`${issue.url}-${issue.type}-${issue.canonical_url || ""}-${issue.robots_directive || ""}-${issue.directive_source || ""}-${issue.image_url || ""}-${issue.source_url || ""}`}
+                    key={`${issue.url}-${issue.type}-${issue.canonical_url || ""}-${issue.robots_directive || ""}-${issue.directive_source || ""}-${Array.isArray(issue.schema_types) ? issue.schema_types.join(",") : ""}-${issue.image_url || ""}-${issue.source_url || ""}`}
                   >
                     <td className="url-cell">
                       <a
@@ -514,6 +515,14 @@ function App() {
                     <td>
                       {issue.robots_directive ? (
                         <code>{issue.robots_directive}</code>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
+                    <td>
+                      {Array.isArray(issue.schema_types) &&
+                      issue.schema_types.length > 0 ? (
+                        <code>{issue.schema_types.join(", ")}</code>
                       ) : (
                         "—"
                       )}

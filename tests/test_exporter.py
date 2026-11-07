@@ -114,6 +114,13 @@ SAMPLE_PAGES = [
                 "robots_directive": "noindex, follow",
                 "directive_source": "meta_robots",
             },
+            {
+                "type": "duplicate_schema_type",
+                "severity": "warning",
+                "message": "Multiple JSON-LD structured data blocks declare the same schema '@type': Organization",
+                "url": "https://example.com/café",
+                "schema_types": ["Organization"],
+            },
         ],
         "error": None,
     },
@@ -237,7 +244,7 @@ class PageExportTests(ExporterTestCase):
         self.assertIn("seo_issues", rows[0])
         self.assertEqual(json.loads(rows[0]["seo_issues"]), [])
         parsed_issues = json.loads(rows[2]["seo_issues"])
-        self.assertEqual(len(parsed_issues), 9)
+        self.assertEqual(len(parsed_issues), 10)
         self.assertEqual(parsed_issues[0]["type"], "missing_meta_description")
         self.assertEqual(parsed_issues[2]["type"], "duplicate_title")
         self.assertEqual(parsed_issues[3]["type"], "missing_image_alt")
@@ -267,6 +274,11 @@ class PageExportTests(ExporterTestCase):
         self.assertEqual(
             parsed_issues[8]["directive_source"],
             "meta_robots",
+        )
+        self.assertEqual(parsed_issues[9]["type"], "duplicate_schema_type")
+        self.assertEqual(
+            parsed_issues[9]["schema_types"],
+            ["Organization"],
         )
 
         json_data = read_json(json_path)

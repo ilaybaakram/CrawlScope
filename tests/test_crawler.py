@@ -150,7 +150,12 @@ class SeoAuditTests(unittest.TestCase):
         if "text/html" in content_type and 'rel="canonical"' not in html:
             html = html.replace(
                 "<head>",
-                f'<head><link rel="canonical" href="{START_URL}">',
+                (
+                    f'<head><link rel="canonical" href="{START_URL}">'
+                    '<script type="application/ld+json">'
+                    '{"@context":"https://schema.org","@type":"WebPage"}'
+                    "</script>"
+                ),
                 1,
             )
 
@@ -238,13 +243,23 @@ class DuplicateSeoAuditTests(unittest.TestCase):
         if 'rel="canonical"' not in first_html:
             first_html = first_html.replace(
                 "<head>",
-                f'<head><link rel="canonical" href="{START_URL}">',
+                (
+                    f'<head><link rel="canonical" href="{START_URL}">'
+                    '<script type="application/ld+json">'
+                    '{"@context":"https://schema.org","@type":"WebPage"}'
+                    "</script>"
+                ),
                 1,
             )
         if "text/html" in second_content_type and 'rel="canonical"' not in second_html:
             second_html = second_html.replace(
                 "<head>",
-                f'<head><link rel="canonical" href="{page_two_url}">',
+                (
+                    f'<head><link rel="canonical" href="{page_two_url}">'
+                    '<script type="application/ld+json">'
+                    '{"@context":"https://schema.org","@type":"WebPage"}'
+                    "</script>"
+                ),
                 1,
             )
 
@@ -401,7 +416,12 @@ class ImageSeoAuditTests(unittest.TestCase):
         if "text/html" in content_type and 'rel="canonical"' not in html:
             html = html.replace(
                 "<head>",
-                f'<head><link rel="canonical" href="{START_URL}">',
+                (
+                    f'<head><link rel="canonical" href="{START_URL}">'
+                    '<script type="application/ld+json">'
+                    '{"@context":"https://schema.org","@type":"WebPage"}'
+                    "</script>"
+                ),
                 1,
             )
 
@@ -653,7 +673,10 @@ class BrokenImageDetectionTests(unittest.TestCase):
         html = (
             '<html><head><title>Title</title>'
             '<meta name="description" content="Desc">'
-            f'<link rel="canonical" href="{START_URL}"></head>'
+            f'<link rel="canonical" href="{START_URL}">'
+            '<script type="application/ld+json">'
+            '{"@context":"https://schema.org","@type":"WebPage"}'
+            "</script></head>"
             '<body><h1>Heading</h1><img src="/timeout.png" alt="Timeout"></body></html>'
         )
 
@@ -706,7 +729,12 @@ class UrlSeoAuditTests(unittest.TestCase):
     def crawl_url(self, target_url: str, **kwargs):
         html_with_canonical = self.COMPLETE_HTML.replace(
             "<head>",
-            f'<head><link rel="canonical" href="{target_url}">',
+            (
+                f'<head><link rel="canonical" href="{target_url}">'
+                '<script type="application/ld+json">'
+                '{"@context":"https://schema.org","@type":"WebPage"}'
+                "</script>"
+            ),
             1,
         )
 
@@ -809,7 +837,10 @@ class RedirectAuditTests(unittest.TestCase):
         html = (
             '<html><head><title>Home</title>'
             '<meta name="description" content="Home description">'
-            f'<link rel="canonical" href="{START_URL}"></head>'
+            f'<link rel="canonical" href="{START_URL}">'
+            '<script type="application/ld+json">'
+            '{"@context":"https://schema.org","@type":"WebPage"}'
+            "</script></head>"
             f"<body><h1>Home Heading</h1>{links_html}</body></html>"
         )
         head_calls: list[str] = []
@@ -1066,6 +1097,9 @@ class CanonicalSeoAuditTests(unittest.TestCase):
         html = (
             f"<html><head><title>Page Title</title>"
             f'<meta name="description" content="Page description">'
+            '<script type="application/ld+json">'
+            '{"@context":"https://schema.org","@type":"WebPage"}'
+            "</script>"
             f"{head_tags}</head>"
             f"<body><h1>Page Heading</h1></body></html>"
         )
@@ -1267,6 +1301,9 @@ class RobotsSeoAuditTests(unittest.TestCase):
             f"<html><head><title>Page Title</title>"
             f'<meta name="description" content="Page description">'
             f'<link rel="canonical" href="{START_URL}">'
+            '<script type="application/ld+json">'
+            '{"@context":"https://schema.org","@type":"WebPage"}'
+            "</script>"
             f"{meta_tags}</head>"
             f"<body><h1>Page Heading</h1></body></html>"
         )
@@ -1423,6 +1460,190 @@ class RobotsSeoAuditTests(unittest.TestCase):
         page = self.crawl_page_with_robots(
             meta_tags='<meta name="robots" content="noindex">',
             x_robots_headers="noindex, nofollow",
+            content_type="application/json",
+        )
+        self.assertEqual(page["seo_issues"], [])
+
+
+class StructuredDataSeoAuditTests(unittest.TestCase):
+    def crawl_page_with_scripts(
+        self,
+        scripts_html: str = "",
+        content_type: str = "text/html; charset=utf-8",
+    ):
+        html = (
+            f"<html><head><title>Page Title</title>"
+            f'<meta name="description" content="Page description">'
+            f'<link rel="canonical" href="{START_URL}">'
+            f"{scripts_html}</head>"
+            f"<body><h1>Page Heading</h1></body></html>"
+        )
+
+        def fake_get(url, **_):
+            if url.endswith("/robots.txt"):
+                return make_response("GET", url, 200, ROBOTS_TXT)
+            return httpx.Response(
+                200,
+                text=html,
+                headers={"content-type": content_type},
+                request=httpx.Request("GET", url),
+            )
+
+        with patch("crawler.httpx.get", side_effect=fake_get), \
+             patch("crawler.time.sleep"):
+            pages = crawler.crawl_website(START_URL, max_pages=1, max_depth=0)
+        return pages[0]
+
+    def test_missing_structured_data_is_detected(self):
+        page = self.crawl_page_with_scripts("")
+        self.assertEqual(len(page["seo_issues"]), 1)
+        issue = page["seo_issues"][0]
+        self.assertEqual(issue["type"], "missing_structured_data")
+        self.assertEqual(issue["severity"], "warning")
+        self.assertEqual(issue["url"], START_URL)
+        self.assertEqual(issue["schema_types"], [])
+
+    def test_valid_single_and_nested_json_ld_produce_no_issues(self):
+        page = self.crawl_page_with_scripts(
+            '<script type="application/ld+json">'
+            "{"
+            '"@context": "https://schema.org",'
+            '"@type": "Article",'
+            '"headline": "Structured Data Guide",'
+            '"author": ['
+            '  {"@type": "Person", "name": "Alice"},'
+            '  {"@type": "Person", "name": "Bob"}'
+            "],"
+            '"publisher": {'
+            '  "@type": "Organization",'
+            '  "name": "CrawlScope"'
+            "}"
+            "}"
+            "</script>"
+        )
+        self.assertEqual(page["seo_issues"], [])
+
+    def test_valid_graph_and_array_and_multitype_json_ld_produce_no_issues(self):
+        graph_page = self.crawl_page_with_scripts(
+            '<script type="application/ld+json; charset=utf-8">'
+            "{"
+            '"@context": "https://schema.org",'
+            '"@graph": ['
+            '  {"@type": "WebSite", "@id": "https://example.com/#website", "name": "Example"},'
+            '  {"@type": ["WebPage", "CollectionPage"], "isPartOf": {"@id": "https://example.com/#website"}}'
+            "]"
+            "}"
+            "</script>"
+        )
+        self.assertEqual(graph_page["seo_issues"], [])
+
+        array_page = self.crawl_page_with_scripts(
+            '<script type="APPLICATION/LD+JSON">'
+            "["
+            '  {"@context": "https://schema.org", "@type": "Organization", "name": "Example"},'
+            '  {"@context": "https://schema.org", "@type": "BreadcrumbList", "itemListElement": []}'
+            "]"
+            "</script>"
+        )
+        self.assertEqual(array_page["seo_issues"], [])
+
+    def test_invalid_or_empty_json_ld_is_detected_safely(self):
+        for bad_script in (
+            '<script type="application/ld+json">{invalid json</script>',
+            '<script type="application/ld+json">   \n\t  </script>',
+            '<script type="application/ld+json"></script>',
+        ):
+            page = self.crawl_page_with_scripts(bad_script)
+            self.assertEqual(len(page["seo_issues"]), 1)
+            issue = page["seo_issues"][0]
+            self.assertEqual(issue["type"], "invalid_json_ld")
+            self.assertEqual(issue["severity"], "warning")
+            self.assertEqual(issue["url"], START_URL)
+            self.assertEqual(issue["schema_types"], [])
+
+    def test_missing_schema_type_is_detected_on_root_graph_and_nested_objects(self):
+        for payload in (
+            '{"@context": "https://schema.org", "name": "Missing type"}',
+            '{"@context": "https://schema.org", "@type": "   ", "name": "Blank type"}',
+            '{"@context": "https://schema.org", "@type": [], "name": "Empty list type"}',
+            '{"@context": "https://schema.org", "@graph": [{"name": "Graph item without type"}]}',
+            '{"@context": "https://schema.org", "@type": "Article", "author": {"name": "Author without type"}}',
+        ):
+            page = self.crawl_page_with_scripts(
+                f'<script type="application/ld+json">{payload}</script>'
+            )
+            issue_types = [issue["type"] for issue in page["seo_issues"]]
+            self.assertEqual(issue_types, ["missing_schema_type"])
+            self.assertEqual(page["seo_issues"][0]["severity"], "warning")
+            self.assertEqual(page["seo_issues"][0]["url"], START_URL)
+
+    def test_duplicate_schema_type_detected_across_blocks_and_graph(self):
+        two_blocks_page = self.crawl_page_with_scripts(
+            '<script type="application/ld+json">'
+            '{"@context": "https://schema.org", "@type": "Organization", "name": "One"}'
+            "</script>"
+            '<script type="application/ld+json">'
+            '{"@context": "https://schema.org", "@type": "https://schema.org/Organization", "name": "Two"}'
+            "</script>"
+        )
+        self.assertEqual(len(two_blocks_page["seo_issues"]), 1)
+        dup_issue = two_blocks_page["seo_issues"][0]
+        self.assertEqual(dup_issue["type"], "duplicate_schema_type")
+        self.assertEqual(dup_issue["severity"], "warning")
+        self.assertEqual(dup_issue["url"], START_URL)
+        self.assertEqual(dup_issue["schema_types"], ["Organization"])
+        self.assertIn("Organization", dup_issue["message"])
+
+        graph_dup_page = self.crawl_page_with_scripts(
+            '<script type="application/ld+json">'
+            "{"
+            '"@context": "https://schema.org",'
+            '"@graph": ['
+            '  {"@type": "FAQPage", "name": "FAQ 1"},'
+            '  {"@type": "FAQPage", "name": "FAQ 2"}'
+            "]"
+            "}"
+            "</script>"
+        )
+        self.assertEqual(
+            [issue["type"] for issue in graph_dup_page["seo_issues"]],
+            ["duplicate_schema_type"],
+        )
+        self.assertEqual(
+            graph_dup_page["seo_issues"][0]["schema_types"],
+            ["FAQPage"],
+        )
+
+    def test_invalid_schema_structure_is_detected(self):
+        for bad_structure in (
+            '"just a string"',
+            "123",
+            "true",
+            "null",
+            "[]",
+            "{}",
+            '[{"@type": "Organization"}, "not an object"]',
+            '{"@context": "https://schema.org", "@graph": "not-a-list"}',
+            '{"@context": "https://schema.org", "@graph": []}',
+            '{"@context": "https://schema.org", "@graph": [{}]}',
+            '{"@context": "https://schema.org", "@type": 123}',
+            '{"@context": "https://schema.org", "@type": ["Article", 456]}',
+        ):
+            page = self.crawl_page_with_scripts(
+                f'<script type="application/ld+json">{bad_structure}</script>'
+            )
+            issue_types = [issue["type"] for issue in page["seo_issues"]]
+            self.assertEqual(
+                issue_types,
+                ["invalid_schema_structure"],
+                msg=f"Failed for payload: {bad_structure}",
+            )
+            self.assertEqual(page["seo_issues"][0]["severity"], "warning")
+            self.assertEqual(page["seo_issues"][0]["url"], START_URL)
+
+    def test_non_html_page_is_excluded_from_structured_data_audit(self):
+        page = self.crawl_page_with_scripts(
+            "",
             content_type="application/json",
         )
         self.assertEqual(page["seo_issues"], [])

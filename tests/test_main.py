@@ -77,6 +77,13 @@ SAMPLE_PAGE = {
             "robots_directive": "noindex, follow",
             "directive_source": "meta_robots",
         },
+        {
+            "type": "duplicate_schema_type",
+            "severity": "warning",
+            "message": "Multiple JSON-LD structured data blocks declare the same schema '@type': Organization",
+            "url": "https://example.com/",
+            "schema_types": ["Organization"],
+        },
     ],
     "error": None,
 }
@@ -153,6 +160,7 @@ class FastAPIEndpointTests(unittest.TestCase):
                 "redirect_chain",
                 "cross_domain_canonical",
                 "noindex_page",
+                "duplicate_schema_type",
             ],
         )
         self.assertEqual(
@@ -162,6 +170,10 @@ class FastAPIEndpointTests(unittest.TestCase):
         self.assertEqual(
             data["pages"][0]["seo_issues"][7]["directive_source"],
             "meta_robots",
+        )
+        self.assertEqual(
+            data["pages"][0]["seo_issues"][8]["schema_types"],
+            ["Organization"],
         )
         self.assertEqual(
             data["pages"][0]["seo_issues"][6]["canonical_url"],
