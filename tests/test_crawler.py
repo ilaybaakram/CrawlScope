@@ -219,6 +219,159 @@ class SeoAuditTests(unittest.TestCase):
         self.assertEqual(page["seo_issues"], [])
 
 
+class DuplicateSeoAuditTests(unittest.TestCase):
+    def crawl_two_pages(
+        self,
+        first_html: str,
+        second_html: str,
+        second_content_type: str = "text/html; charset=utf-8",
+        second_status: int = 200,
+    ):
+        page_two_url = "https://example.com/page-2"
+
+        def fake_get(url, **_):
+            if url.endswith("/robots.txt"):
+                return make_response("GET", url, 200, ROBOTS_TXT)
+            if url == START_URL:
+                return httpx.Response(
+                    200,
+                    text=first_html,
+                    headers={"content-type": "text/html; charset=utf-8"},
+                    request=httpx.Request("GET", url),
+                )
+            return httpx.Response(
+                second_status,
+                text=second_html,
+                headers={"content-type": second_content_type},
+                request=httpx.Request("GET", url),
+            )
+
+        def fake_head(url, **_):
+            return make_response("HEAD", url, 200)
+
+        with patch("crawler.httpx.get", side_effect=fake_get), \
+             patch("crawler.httpx.head", side_effect=fake_head), \
+             patch("crawler.time.sleep"):
+            return crawler.crawl_website(
+                START_URL,
+                max_pages=2,
+                max_depth=1,
+            )
+
+    def test_duplicate_titles_detected_across_pages(self):
+        pages = self.crawl_two_pages(
+            '<html><head><title>Shared Title</title>'
+            '<meta name="description" content="Desc 1"></head>'
+            '<body><h1>H1 One</h1><a href="/page-2">Next</a></body></html>',
+            '<html><head><title>Shared Title</title>'
+            '<meta name="description" content="Desc 2"></head>'
+            "<body><h1>H1 Two</h1></body></html>",
+        )
+        self.assertEqual(len(pages), 2)
+        for page in pages:
+            types = [issue["type"] for issue in page["seo_issues"]]
+            self.assertIn("duplicate_title", types)
+            dup_issue = next(
+                issue for issue in page["seo_issues"] if issue["type"] == "duplicate_title"
+            )
+            self.assertEqual(dup_issue["severity"], "warning")
+            self.assertEqual(dup_issue["url"], page["url"])
+            self.assertIn("https://example.com/", dup_issue["message"])
+            self.assertIn("https://example.com/page-2", dup_issue["message"])
+
+    def test_duplicate_meta_descriptions_detected_across_pages(self):
+        pages = self.crawl_two_pages(
+            '<html><head><title>Title 1</title>'
+            '<meta name="description" content="Same description here"></head>'
+            '<body><h1>H1 One</h1><a href="/page-2">Next</a></body></html>',
+            '<html><head><title>Title 2</title>'
+            '<meta name="description" content="Same description here"></head>'
+            "<body><h1>H1 Two</h1></body></html>",
+        )
+        for page in pages:
+            types = [issue["type"] for issue in page["seo_issues"]]
+            self.assertEqual(types, ["duplicate_meta_description"])
+
+    def test_duplicate_h1_detected_across_pages(self):
+        pages = self.crawl_two_pages(
+            '<html><head><title>Title 1</title>'
+            '<meta name="description" content="Desc 1"></head>'
+            '<body><h1>Identical Heading</h1><a href="/page-2">Next</a></body></html>',
+            '<html><head><title>Title 2</title>'
+            '<meta name="description" content="Desc 2"></head>'
+            "<body><h1>Identical Heading</h1></body></html>",
+        )
+        for page in pages:
+            types = [issue["type"] for issue in page["seo_issues"]]
+            self.assertEqual(types, ["duplicate_h1"])
+
+    def test_case_and_whitespace_differences_still_match_as_duplicates(self):
+        pages = self.crawl_two_pages(
+            '<html><head><title>  Welcome   To   CrawlScope  </title>'
+            '<meta name="description" content="  Best   SEO   Tool "></head>'
+            '<body><h1>  Main   Header </h1><a href="/page-2">Next</a></body></html>',
+            '<html><head><title>welcome to crawlscope</title>'
+            '<meta name="description" content="best seo tool"></head>'
+            "<body><h1>main\n\theader</h1></body></html>",
+        )
+        for page in pages:
+            types = [issue["type"] for issue in page["seo_issues"]]
+            self.assertEqual(
+                types,
+                [
+                    "duplicate_title",
+                    "duplicate_meta_description",
+                    "duplicate_h1",
+                ],
+            )
+
+    def test_empty_or_missing_metadata_is_not_classified_as_duplicate(self):
+        pages = self.crawl_two_pages(
+            '<html><head><title>   </title></head>'
+            '<body><a href="/page-2">Next</a></body></html>',
+            "<html><head></head><body><h1>   </h1></body></html>",
+        )
+        for page in pages:
+            types = [issue["type"] for issue in page["seo_issues"]]
+            self.assertEqual(
+                types,
+                ["missing_title", "missing_meta_description", "missing_h1"],
+            )
+
+    def test_unique_metadata_produces_no_duplicate_issues(self):
+        pages = self.crawl_two_pages(
+            '<html><head><title>Title One</title>'
+            '<meta name="description" content="Description One"></head>'
+            '<body><h1>Heading One</h1><a href="/page-2">Next</a></body></html>',
+            '<html><head><title>Title Two</title>'
+            '<meta name="description" content="Description Two"></head>'
+            "<body><h1>Heading Two</h1></body></html>",
+        )
+        for page in pages:
+            self.assertEqual(page["seo_issues"], [])
+
+    def test_non_html_and_failed_pages_excluded_from_duplicate_comparison(self):
+        non_html_pages = self.crawl_two_pages(
+            '<html><head><title>Shared Title</title>'
+            '<meta name="description" content="Desc"></head>'
+            '<body><h1>Heading</h1><a href="/page-2">Next</a></body></html>',
+            '<html><head><title>Shared Title</title></head></html>',
+            second_content_type="application/json",
+        )
+        self.assertEqual(non_html_pages[0]["seo_issues"], [])
+        self.assertEqual(non_html_pages[1]["seo_issues"], [])
+
+        failed_pages = self.crawl_two_pages(
+            '<html><head><title>Shared Title</title>'
+            '<meta name="description" content="Desc"></head>'
+            '<body><h1>Heading</h1><a href="/page-2">Next</a></body></html>',
+            '<html><head><title>Shared Title</title></head></html>',
+            second_status=404,
+        )
+        self.assertEqual(failed_pages[0]["seo_issues"], [])
+        self.assertEqual(failed_pages[1]["seo_issues"], [])
+
+
 if __name__ == "__main__":
     unittest.main()
 

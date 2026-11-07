@@ -20,7 +20,13 @@ SAMPLE_PAGE = {
             "severity": "warning",
             "message": "Page is missing a <meta name=\"description\"> tag or its content is empty.",
             "url": "https://example.com/",
-        }
+        },
+        {
+            "type": "duplicate_title",
+            "severity": "warning",
+            "message": "Page title 'Example Domain' is duplicated across pages: https://example.com/, https://example.com/about",
+            "url": "https://example.com/",
+        },
     ],
     "error": None,
 }
@@ -87,8 +93,8 @@ class FastAPIEndpointTests(unittest.TestCase):
         self.assertEqual(data["links_checked"], 1)
         self.assertEqual(data["pages"], [SAMPLE_PAGE])
         self.assertEqual(
-            data["pages"][0]["seo_issues"][0]["type"],
-            "missing_meta_description",
+            [issue["type"] for issue in data["pages"][0]["seo_issues"]],
+            ["missing_meta_description", "duplicate_title"],
         )
         self.assertEqual(data["links"], [SAMPLE_LINK])
 

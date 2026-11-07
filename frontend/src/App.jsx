@@ -442,8 +442,8 @@ function App() {
         {seoIssues.length === 0 ? (
           <p className="empty-state">
             {crawlData
-              ? "No missing SEO metadata issues detected in this crawl."
-              : "Missing title, meta description, and H1 issues will appear here after a crawl."}
+              ? "No missing or duplicate SEO metadata issues detected in this crawl."
+              : "Missing or duplicate title, meta description, and H1 issues will appear here after a crawl."}
           </p>
         ) : (
           <div className="table-wrapper">

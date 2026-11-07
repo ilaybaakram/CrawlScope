@@ -53,6 +53,12 @@ SAMPLE_PAGES = [
                 "message": "Page is missing an <h1> heading or the heading is empty.",
                 "url": "https://example.com/café",
             },
+            {
+                "type": "duplicate_title",
+                "severity": "warning",
+                "message": "Page title 'Café – 日本語' is duplicated across pages: https://example.com/café, https://example.com/café-2",
+                "url": "https://example.com/café",
+            },
         ],
         "error": None,
     },
@@ -176,8 +182,9 @@ class PageExportTests(ExporterTestCase):
         self.assertIn("seo_issues", rows[0])
         self.assertEqual(json.loads(rows[0]["seo_issues"]), [])
         parsed_issues = json.loads(rows[2]["seo_issues"])
-        self.assertEqual(len(parsed_issues), 2)
+        self.assertEqual(len(parsed_issues), 3)
         self.assertEqual(parsed_issues[0]["type"], "missing_meta_description")
+        self.assertEqual(parsed_issues[2]["type"], "duplicate_title")
 
         json_data = read_json(json_path)
         self.assertEqual(json_data[2]["seo_issues"], SAMPLE_PAGES[2]["seo_issues"])

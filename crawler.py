@@ -91,6 +91,76 @@ def detect_seo_issues(
     return issues
 
 
+def normalize_metadata_value(
+    value: str | None,
+    is_title: bool = False,
+) -> str | None:
+    if not value:
+        return None
+    collapsed = " ".join(value.split())
+    if not collapsed:
+        return None
+    if is_title and collapsed == "No title found":
+        return None
+    return collapsed.casefold()
+
+
+def detect_duplicate_seo_issues(results: list[dict[str, Any]]) -> None:
+    html_pages = [
+        page
+        for page in results
+        if page.get("error") is None and is_html_content(page.get("content_type"))
+    ]
+
+    checks = [
+        ("title", "duplicate_title", "Page title", True),
+        (
+            "meta_description",
+            "duplicate_meta_description",
+            "Meta description",
+            False,
+        ),
+        ("h1", "duplicate_h1", "H1 heading", False),
+    ]
+
+    for field_name, issue_type, label, is_title in checks:
+        groups: dict[str, list[dict[str, Any]]] = {}
+        for page in html_pages:
+            normalized = normalize_metadata_value(
+                page.get(field_name),
+                is_title=is_title,
+            )
+            if normalized is None:
+                continue
+            groups.setdefault(normalized, []).append(page)
+
+        for matching_pages in groups.values():
+            if len(matching_pages) < 2:
+                continue
+
+            affected_urls = [page["url"] for page in matching_pages]
+            urls_text = ", ".join(affected_urls)
+
+            for page in matching_pages:
+                seo_issues = page.setdefault("seo_issues", [])
+                existing_types = {issue["type"] for issue in seo_issues}
+                if issue_type in existing_types:
+                    continue
+
+                raw_value = " ".join(str(page.get(field_name, "")).split())
+                seo_issues.append(
+                    {
+                        "type": issue_type,
+                        "severity": "warning",
+                        "message": (
+                            f"{label} '{raw_value}' is duplicated across "
+                            f"pages: {urls_text}"
+                        ),
+                        "url": page["url"],
+                    }
+                )
+
+
 def crawl_website(
     start_url: str,
     max_pages: int = 10,
@@ -330,6 +400,8 @@ def crawl_website(
                 f"HTTP status error {error.response.status_code} "
                 f"while fetching {current_url}: {error}"
             )
+
+    detect_duplicate_seo_issues(results)
 
     successful_pages = sum(1 for item in results if item["error"] is None)
     print(
