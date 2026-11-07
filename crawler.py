@@ -393,6 +393,240 @@ def trace_redirect_chain(
     }
 
 
+def _find_canonical_link_tags(soup: BeautifulSoup) -> list[Any]:
+    canonical_tags: list[Any] = []
+    for tag in soup.find_all("link"):
+        rel_attr = tag.get("rel")
+        if isinstance(rel_attr, list):
+            rel_values = [str(item).strip().lower() for item in rel_attr]
+        elif isinstance(rel_attr, str):
+            rel_values = [item.strip().lower() for item in rel_attr.split()]
+        else:
+            rel_values = []
+        if "canonical" in rel_values:
+            canonical_tags.append(tag)
+    return canonical_tags
+
+
+def _resolve_canonical_url(
+    page_url: str,
+    raw_href: Any,
+) -> tuple[str | None, bool]:
+    if raw_href is None:
+        return None, False
+
+    href_text = str(raw_href).strip()
+    if not href_text:
+        return None, False
+
+    if any(char.isspace() for char in href_text):
+        return href_text, False
+
+    if "://" in href_text:
+        scheme_part, _, _ = href_text.partition("://")
+        if not scheme_part or scheme_part.lower() not in ("http", "https"):
+            return href_text, False
+
+    try:
+        parsed_raw = urlparse(href_text)
+        if parsed_raw.scheme and parsed_raw.scheme.lower() not in (
+            "http",
+            "https",
+        ):
+            return href_text, False
+        if (
+            parsed_raw.scheme.lower() in ("http", "https")
+            and not parsed_raw.hostname
+        ):
+            return href_text, False
+        if href_text.startswith("//") and not parsed_raw.hostname:
+            return href_text, False
+
+        resolved = urljoin(page_url, href_text)
+        clean_resolved, _ = urldefrag(resolved)
+        parsed = urlparse(clean_resolved)
+        _ = parsed.port
+    except ValueError:
+        return href_text, False
+
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return clean_resolved or href_text, False
+
+    return clean_resolved, True
+
+
+def detect_canonical_seo_issues(
+    url: str,
+    soup: BeautifulSoup,
+    content_type: str | None,
+    headers: dict[str, str] | None = None,
+    checked_redirects: dict[str, dict[str, Any] | None] | None = None,
+    initial_link_hops: dict[str, tuple[int | None, str | None, str | None]]
+    | None = None,
+    crawled_pages: dict[str, dict[str, Any]] | None = None,
+    max_redirect_checks: int = 50,
+    delay_seconds: float = 1.0,
+) -> list[dict[str, Any]]:
+    if not is_html_content(content_type):
+        return []
+
+    canonical_tags = _find_canonical_link_tags(soup)
+
+    if not canonical_tags:
+        return [
+            {
+                "type": "missing_canonical",
+                "severity": "warning",
+                "message": 'Page is missing a <link rel="canonical"> tag.',
+                "url": url,
+                "canonical_url": None,
+            }
+        ]
+
+    if len(canonical_tags) > 1:
+        discovered_urls: list[str] = []
+        first_canonical_url: str | None = None
+        for tag in canonical_tags:
+            resolved_url, is_valid = _resolve_canonical_url(
+                url, tag.get("href")
+            )
+            if resolved_url:
+                discovered_urls.append(resolved_url)
+                if first_canonical_url is None and is_valid:
+                    first_canonical_url = resolved_url
+                elif first_canonical_url is None:
+                    first_canonical_url = resolved_url
+            else:
+                discovered_urls.append("(empty)")
+
+        return [
+            {
+                "type": "multiple_canonicals",
+                "severity": "warning",
+                "message": (
+                    f"Page has multiple canonical link tags "
+                    f"({len(canonical_tags)}): {', '.join(discovered_urls)}"
+                ),
+                "url": url,
+                "canonical_url": first_canonical_url,
+            }
+        ]
+
+    raw_href = canonical_tags[0].get("href")
+    canonical_url, is_valid = _resolve_canonical_url(url, raw_href)
+
+    if not is_valid or canonical_url is None:
+        if canonical_url is None:
+            message = (
+                "Canonical link tag has an empty or missing href attribute."
+            )
+        else:
+            message = (
+                f"Invalid canonical URL '{canonical_url}': "
+                "must resolve to a valid HTTP or HTTPS URL."
+            )
+        return [
+            {
+                "type": "invalid_canonical",
+                "severity": "warning",
+                "message": message,
+                "url": url,
+                "canonical_url": canonical_url,
+            }
+        ]
+
+    issues: list[dict[str, Any]] = []
+    seen_types: set[str] = set()
+
+    page_hostname = (urlparse(url).hostname or "").casefold()
+    canonical_hostname = (urlparse(canonical_url).hostname or "").casefold()
+
+    if canonical_hostname != page_hostname:
+        seen_types.add("cross_domain_canonical")
+        issues.append(
+            {
+                "type": "cross_domain_canonical",
+                "severity": "info",
+                "message": (
+                    f"Canonical URL points to a different domain "
+                    f"({canonical_hostname} vs {page_hostname}): {canonical_url}"
+                ),
+                "url": url,
+                "canonical_url": canonical_url,
+            }
+        )
+
+    if headers is not None and checked_redirects is not None:
+        already_crawled_non_redirect = (
+            canonical_url == url
+            or (
+                crawled_pages is not None
+                and canonical_url in crawled_pages
+                and crawled_pages[canonical_url].get("status_code") is not None
+                and not (
+                    300 <= crawled_pages[canonical_url]["status_code"] < 400
+                )
+            )
+        )
+
+        redirect_finding: dict[str, Any] | None = None
+        if not already_crawled_non_redirect:
+            if canonical_url in checked_redirects:
+                redirect_finding = checked_redirects[canonical_url]
+            elif len(checked_redirects) < max_redirect_checks:
+                initial_hop = (
+                    initial_link_hops.get(canonical_url)
+                    if initial_link_hops is not None
+                    else None
+                )
+                if initial_hop is None and delay_seconds > 0:
+                    time.sleep(delay_seconds)
+                redirect_finding = trace_redirect_chain(
+                    source_url=canonical_url,
+                    headers=headers,
+                    delay_seconds=delay_seconds,
+                    initial_hop=initial_hop,
+                )
+                checked_redirects[canonical_url] = redirect_finding
+
+        if (
+            redirect_finding is not None
+            and "canonical_redirect" not in seen_types
+        ):
+            seen_types.add("canonical_redirect")
+            destination_url = redirect_finding.get("destination_url")
+            if destination_url:
+                redirect_message = (
+                    f"Canonical URL redirects from {canonical_url} "
+                    f"to {destination_url}"
+                )
+            else:
+                chain_str = " -> ".join(
+                    redirect_finding.get("redirect_chain", [canonical_url])
+                )
+                redirect_message = (
+                    f"Canonical URL {canonical_url} redirects in a loop: "
+                    f"{chain_str}"
+                )
+
+            issues.append(
+                {
+                    "type": "canonical_redirect",
+                    "severity": "warning",
+                    "message": redirect_message,
+                    "url": url,
+                    "canonical_url": canonical_url,
+                    "destination_url": destination_url,
+                    "redirect_chain": list(
+                        redirect_finding.get("redirect_chain", [])
+                    ),
+                    "status_code": redirect_finding.get("status_code"),
+                }
+            )
+
+    return issues
+
+
 def normalize_metadata_value(
     value: str | None,
     is_title: bool = False,
@@ -743,6 +977,20 @@ def crawl_website(
                             "status_code": redirect_finding["status_code"],
                         }
                     )
+
+            seo_issues.extend(
+                detect_canonical_seo_issues(
+                    url=current_url,
+                    soup=soup,
+                    content_type=content_type,
+                    headers=headers,
+                    checked_redirects=checked_redirects,
+                    initial_link_hops=initial_link_hops,
+                    crawled_pages=crawled_pages,
+                    max_redirect_checks=max_redirect_checks,
+                    delay_seconds=delay_seconds,
+                )
+            )
 
         except httpx.RequestError as error:
             results.append(

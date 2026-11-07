@@ -453,6 +453,7 @@ function App() {
                   <th>Page URL</th>
                   <th>Issue Type</th>
                   <th>Severity</th>
+                  <th>Canonical URL</th>
                   <th>Source URL</th>
                   <th>Destination URL</th>
                   <th>Redirect Chain</th>
@@ -464,7 +465,7 @@ function App() {
               <tbody>
                 {seoIssues.map((issue) => (
                   <tr
-                    key={`${issue.url}-${issue.type}-${issue.image_url || ""}-${issue.source_url || ""}`}
+                    key={`${issue.url}-${issue.type}-${issue.canonical_url || ""}-${issue.image_url || ""}-${issue.source_url || ""}`}
                   >
                     <td className="url-cell">
                       <a
@@ -490,6 +491,24 @@ function App() {
                       >
                         {issue.severity}
                       </span>
+                    </td>
+                    <td className="url-cell">
+                      {issue.canonical_url ? (
+                        issue.canonical_url.startsWith("http://") ||
+                        issue.canonical_url.startsWith("https://") ? (
+                          <a
+                            href={issue.canonical_url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                          >
+                            {issue.canonical_url}
+                          </a>
+                        ) : (
+                          <code>{issue.canonical_url}</code>
+                        )
+                      ) : (
+                        "—"
+                      )}
                     </td>
                     <td className="url-cell">
                       {issue.source_url ? (

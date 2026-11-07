@@ -147,6 +147,13 @@ class CrawlLinkCheckTests(unittest.TestCase):
 
 class SeoAuditTests(unittest.TestCase):
     def crawl_single_page(self, html: str, content_type: str = "text/html; charset=utf-8"):
+        if "text/html" in content_type and 'rel="canonical"' not in html:
+            html = html.replace(
+                "<head>",
+                f'<head><link rel="canonical" href="{START_URL}">',
+                1,
+            )
+
         def fake_get(url, **_):
             if url.endswith("/robots.txt"):
                 return make_response("GET", url, 200, ROBOTS_TXT)
@@ -228,6 +235,18 @@ class DuplicateSeoAuditTests(unittest.TestCase):
         second_status: int = 200,
     ):
         page_two_url = "https://example.com/page-2"
+        if 'rel="canonical"' not in first_html:
+            first_html = first_html.replace(
+                "<head>",
+                f'<head><link rel="canonical" href="{START_URL}">',
+                1,
+            )
+        if "text/html" in second_content_type and 'rel="canonical"' not in second_html:
+            second_html = second_html.replace(
+                "<head>",
+                f'<head><link rel="canonical" href="{page_two_url}">',
+                1,
+            )
 
         def fake_get(url, **_):
             if url.endswith("/robots.txt"):
@@ -379,6 +398,13 @@ class ImageSeoAuditTests(unittest.TestCase):
         content_type: str = "text/html; charset=utf-8",
         status_code: int = 200,
     ):
+        if "text/html" in content_type and 'rel="canonical"' not in html:
+            html = html.replace(
+                "<head>",
+                f'<head><link rel="canonical" href="{START_URL}">',
+                1,
+            )
+
         def fake_get(url, **_):
             if url.endswith("/robots.txt"):
                 return make_response("GET", url, 200, ROBOTS_TXT)
@@ -626,7 +652,8 @@ class BrokenImageDetectionTests(unittest.TestCase):
     def test_image_request_failure_is_handled_gracefully(self):
         html = (
             '<html><head><title>Title</title>'
-            '<meta name="description" content="Desc"></head>'
+            '<meta name="description" content="Desc">'
+            f'<link rel="canonical" href="{START_URL}"></head>'
             '<body><h1>Heading</h1><img src="/timeout.png" alt="Timeout"></body></html>'
         )
 
@@ -677,10 +704,16 @@ class UrlSeoAuditTests(unittest.TestCase):
     )
 
     def crawl_url(self, target_url: str, **kwargs):
+        html_with_canonical = self.COMPLETE_HTML.replace(
+            "<head>",
+            f'<head><link rel="canonical" href="{target_url}">',
+            1,
+        )
+
         def fake_get(url, **_):
             if url.endswith("/robots.txt"):
                 return make_response("GET", url, 200, ROBOTS_TXT)
-            return make_response("GET", url, 200, self.COMPLETE_HTML)
+            return make_response("GET", url, 200, html_with_canonical)
 
         with patch("crawler.httpx.get", side_effect=fake_get), \
              patch("crawler.time.sleep"):
@@ -775,7 +808,8 @@ class RedirectAuditTests(unittest.TestCase):
     ):
         html = (
             '<html><head><title>Home</title>'
-            '<meta name="description" content="Home description"></head>'
+            '<meta name="description" content="Home description">'
+            f'<link rel="canonical" href="{START_URL}"></head>'
             f"<body><h1>Home Heading</h1>{links_html}</body></html>"
         )
         head_calls: list[str] = []
@@ -1004,6 +1038,222 @@ class RedirectAuditTests(unittest.TestCase):
             "https://example.com/mid-fail",
         )
         self.assertIsNone(page["seo_issues"][0]["status_code"])
+
+
+class CanonicalSeoAuditTests(unittest.TestCase):
+    def make_head_response(
+        self,
+        url: str,
+        status: int = 200,
+        location: str | None = None,
+    ) -> httpx.Response:
+        headers = {"content-type": "text/html"}
+        if location is not None:
+            headers["location"] = location
+        return httpx.Response(
+            status,
+            headers=headers,
+            request=httpx.Request("HEAD", url),
+        )
+
+    def crawl_page_with_head(
+        self,
+        head_tags: str,
+        page_url: str = START_URL,
+        head_map: dict[str, httpx.Response | Exception] | None = None,
+        content_type: str = "text/html; charset=utf-8",
+    ):
+        html = (
+            f"<html><head><title>Page Title</title>"
+            f'<meta name="description" content="Page description">'
+            f"{head_tags}</head>"
+            f"<body><h1>Page Heading</h1></body></html>"
+        )
+        head_calls: list[str] = []
+
+        def fake_get(url, **_):
+            if url.endswith("/robots.txt"):
+                return make_response("GET", url, 200, ROBOTS_TXT)
+            return httpx.Response(
+                200,
+                text=html,
+                headers={"content-type": content_type},
+                request=httpx.Request("GET", url),
+            )
+
+        def fake_head(url, **_):
+            head_calls.append(url)
+            if head_map and url in head_map:
+                outcome = head_map[url]
+                if isinstance(outcome, Exception):
+                    raise outcome
+                return outcome
+            return self.make_head_response(url, 200)
+
+        with patch("crawler.httpx.get", side_effect=fake_get), \
+             patch("crawler.httpx.head", side_effect=fake_head), \
+             patch("crawler.time.sleep"):
+            pages = crawler.crawl_website(page_url, max_pages=1, max_depth=0)
+        return pages[0], head_calls
+
+    def test_missing_canonical_tag_is_detected(self):
+        page, _ = self.crawl_page_with_head("")
+        self.assertEqual(len(page["seo_issues"]), 1)
+        issue = page["seo_issues"][0]
+        self.assertEqual(issue["type"], "missing_canonical")
+        self.assertEqual(issue["severity"], "warning")
+        self.assertEqual(issue["url"], START_URL)
+        self.assertIsNone(issue["canonical_url"])
+
+    def test_one_valid_self_referencing_canonical_tag_produces_no_issues(self):
+        page, head_calls = self.crawl_page_with_head(
+            f'<link rel="canonical" href="{START_URL}">'
+        )
+        self.assertEqual(page["seo_issues"], [])
+        self.assertEqual(head_calls, [])
+
+    def test_multiple_canonical_tags_are_detected(self):
+        page, _ = self.crawl_page_with_head(
+            '<link rel="canonical" href="https://example.com/first">'
+            '<link rel="canonical" href="/second">'
+        )
+        self.assertEqual(len(page["seo_issues"]), 1)
+        issue = page["seo_issues"][0]
+        self.assertEqual(issue["type"], "multiple_canonicals")
+        self.assertEqual(issue["severity"], "warning")
+        self.assertEqual(issue["url"], START_URL)
+        self.assertEqual(issue["canonical_url"], "https://example.com/first")
+        self.assertIn("https://example.com/first", issue["message"])
+        self.assertIn("https://example.com/second", issue["message"])
+
+    def test_empty_canonical_url_is_detected_as_invalid(self):
+        for tag in (
+            '<link rel="canonical" href="">',
+            '<link rel="canonical" href="   ">',
+            '<link rel="canonical">',
+        ):
+            page, _ = self.crawl_page_with_head(tag)
+            self.assertEqual(len(page["seo_issues"]), 1)
+            issue = page["seo_issues"][0]
+            self.assertEqual(issue["type"], "invalid_canonical")
+            self.assertEqual(issue["severity"], "warning")
+            self.assertEqual(issue["url"], START_URL)
+            self.assertIsNone(issue["canonical_url"])
+
+    def test_malformed_canonical_url_is_detected_as_invalid(self):
+        for bad_href in (
+            "mailto:info@example.com",
+            "javascript:void(0)",
+            "ftp://example.com/file",
+            "http://",
+            "https://",
+            "://missing-scheme",
+            "http://[invalid-ipv6",
+            "https://exa mple.com/page",
+        ):
+            page, _ = self.crawl_page_with_head(
+                f'<link rel="canonical" href="{bad_href}">'
+            )
+            self.assertEqual(len(page["seo_issues"]), 1)
+            issue = page["seo_issues"][0]
+            self.assertEqual(issue["type"], "invalid_canonical")
+            self.assertEqual(issue["severity"], "warning")
+            self.assertEqual(issue["url"], START_URL)
+            self.assertEqual(issue["canonical_url"], bad_href)
+
+    def test_relative_canonical_url_is_resolved_against_page_url(self):
+        page_url = "https://example.com/blog/post-1"
+        page, head_calls = self.crawl_page_with_head(
+            '<link rel="canonical" href="/blog/canonical-post">',
+            page_url=page_url,
+            head_map={
+                "https://example.com/blog/canonical-post": self.make_head_response(
+                    "https://example.com/blog/canonical-post", 301, "/blog/final-post"
+                ),
+                "https://example.com/blog/final-post": self.make_head_response(
+                    "https://example.com/blog/final-post", 200
+                ),
+            },
+        )
+        self.assertIn("https://example.com/blog/canonical-post", head_calls)
+        self.assertEqual(len(page["seo_issues"]), 1)
+        issue = page["seo_issues"][0]
+        self.assertEqual(issue["type"], "canonical_redirect")
+        self.assertEqual(
+            issue["canonical_url"],
+            "https://example.com/blog/canonical-post",
+        )
+
+    def test_valid_relative_and_absolute_canonicals_without_redirect_pass(self):
+        rel_page, rel_heads = self.crawl_page_with_head(
+            '<link rel="canonical" href="/canonical-target">',
+            page_url="https://example.com/source-page",
+        )
+        self.assertEqual(rel_page["seo_issues"], [])
+        self.assertEqual(rel_heads, ["https://example.com/canonical-target"])
+
+        abs_page, abs_heads = self.crawl_page_with_head(
+            '<link rel="canonical" href="https://example.com/canonical-target">',
+            page_url="https://example.com/source-page",
+        )
+        self.assertEqual(abs_page["seo_issues"], [])
+        self.assertEqual(abs_heads, ["https://example.com/canonical-target"])
+
+    def test_cross_domain_canonical_url_is_detected_case_insensitively(self):
+        cross_page, _ = self.crawl_page_with_head(
+            '<link rel="canonical" href="  https://syndication.other.org/article  ">'
+        )
+        self.assertEqual(len(cross_page["seo_issues"]), 1)
+        issue = cross_page["seo_issues"][0]
+        self.assertEqual(issue["type"], "cross_domain_canonical")
+        self.assertEqual(issue["severity"], "info")
+        self.assertEqual(issue["url"], START_URL)
+        self.assertEqual(
+            issue["canonical_url"],
+            "https://syndication.other.org/article",
+        )
+
+        # Uppercase matching hostname should NOT be flagged as cross-domain
+        same_domain_page, _ = self.crawl_page_with_head(
+            '<link rel="canonical" href="https://EXAMPLE.COM/clean">'
+        )
+        self.assertEqual(same_domain_page["seo_issues"], [])
+
+    def test_canonical_url_returning_redirect_is_detected(self):
+        head_map = {
+            "https://example.com/old-canonical": self.make_head_response(
+                "https://example.com/old-canonical",
+                301,
+                "https://example.com/new-canonical",
+            ),
+            "https://example.com/new-canonical": self.make_head_response(
+                "https://example.com/new-canonical",
+                200,
+            ),
+        }
+        page, _ = self.crawl_page_with_head(
+            '<link rel="canonical" href="https://example.com/old-canonical">',
+            head_map=head_map,
+        )
+        self.assertEqual(len(page["seo_issues"]), 1)
+        issue = page["seo_issues"][0]
+        self.assertEqual(issue["type"], "canonical_redirect")
+        self.assertEqual(issue["severity"], "warning")
+        self.assertEqual(issue["url"], START_URL)
+        self.assertEqual(
+            issue["canonical_url"],
+            "https://example.com/old-canonical",
+        )
+        self.assertIn("https://example.com/old-canonical", issue["message"])
+        self.assertIn("https://example.com/new-canonical", issue["message"])
+
+    def test_non_html_page_is_excluded_from_canonical_audit(self):
+        page, head_calls = self.crawl_page_with_head(
+            "",
+            content_type="application/json",
+        )
+        self.assertEqual(page["seo_issues"], [])
+        self.assertEqual(head_calls, [])
 
 
 if __name__ == "__main__":

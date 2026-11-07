@@ -62,6 +62,13 @@ SAMPLE_PAGE = {
             ],
             "status_code": 200,
         },
+        {
+            "type": "cross_domain_canonical",
+            "severity": "info",
+            "message": "Canonical URL points to a different domain (other.org vs example.com): https://other.org/canonical",
+            "url": "https://example.com/",
+            "canonical_url": "https://other.org/canonical",
+        },
     ],
     "error": None,
 }
@@ -136,7 +143,12 @@ class FastAPIEndpointTests(unittest.TestCase):
                 "broken_image",
                 "underscore_url",
                 "redirect_chain",
+                "cross_domain_canonical",
             ],
+        )
+        self.assertEqual(
+            data["pages"][0]["seo_issues"][6]["canonical_url"],
+            "https://other.org/canonical",
         )
         self.assertEqual(
             data["pages"][0]["seo_issues"][5]["destination_url"],

@@ -93,6 +93,19 @@ SAMPLE_PAGES = [
                 ],
                 "status_code": 200,
             },
+            {
+                "type": "canonical_redirect",
+                "severity": "warning",
+                "message": "Canonical URL redirects from https://example.com/old-café to https://example.com/café",
+                "url": "https://example.com/café",
+                "canonical_url": "https://example.com/old-café",
+                "destination_url": "https://example.com/café",
+                "redirect_chain": [
+                    "https://example.com/old-café",
+                    "https://example.com/café",
+                ],
+                "status_code": 200,
+            },
         ],
         "error": None,
     },
@@ -216,7 +229,7 @@ class PageExportTests(ExporterTestCase):
         self.assertIn("seo_issues", rows[0])
         self.assertEqual(json.loads(rows[0]["seo_issues"]), [])
         parsed_issues = json.loads(rows[2]["seo_issues"])
-        self.assertEqual(len(parsed_issues), 7)
+        self.assertEqual(len(parsed_issues), 8)
         self.assertEqual(parsed_issues[0]["type"], "missing_meta_description")
         self.assertEqual(parsed_issues[2]["type"], "duplicate_title")
         self.assertEqual(parsed_issues[3]["type"], "missing_image_alt")
@@ -232,6 +245,11 @@ class PageExportTests(ExporterTestCase):
         self.assertEqual(
             parsed_issues[6]["redirect_chain"],
             ["https://example.com/old", "https://example.com/café"],
+        )
+        self.assertEqual(parsed_issues[7]["type"], "canonical_redirect")
+        self.assertEqual(
+            parsed_issues[7]["canonical_url"],
+            "https://example.com/old-café",
         )
 
         json_data = read_json(json_path)
