@@ -121,6 +121,13 @@ SAMPLE_PAGES = [
                 "url": "https://example.com/café",
                 "schema_types": ["Organization"],
             },
+            {
+                "type": "thin_content",
+                "severity": "warning",
+                "message": "Page has thin content (120 words; minimum recommended is 300 words).",
+                "url": "https://example.com/café",
+                "word_count": 120,
+            },
         ],
         "error": None,
     },
@@ -244,7 +251,7 @@ class PageExportTests(ExporterTestCase):
         self.assertIn("seo_issues", rows[0])
         self.assertEqual(json.loads(rows[0]["seo_issues"]), [])
         parsed_issues = json.loads(rows[2]["seo_issues"])
-        self.assertEqual(len(parsed_issues), 10)
+        self.assertEqual(len(parsed_issues), 11)
         self.assertEqual(parsed_issues[0]["type"], "missing_meta_description")
         self.assertEqual(parsed_issues[2]["type"], "duplicate_title")
         self.assertEqual(parsed_issues[3]["type"], "missing_image_alt")
@@ -280,6 +287,8 @@ class PageExportTests(ExporterTestCase):
             parsed_issues[9]["schema_types"],
             ["Organization"],
         )
+        self.assertEqual(parsed_issues[10]["type"], "thin_content")
+        self.assertEqual(parsed_issues[10]["word_count"], 120)
 
         json_data = read_json(json_path)
         self.assertEqual(json_data[2]["seo_issues"], SAMPLE_PAGES[2]["seo_issues"])

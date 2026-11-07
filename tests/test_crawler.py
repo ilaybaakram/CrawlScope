@@ -9,6 +9,9 @@ START_URL = "https://example.com/"
 
 ROBOTS_TXT = "User-agent: *\nDisallow: /private\n"
 
+DEFAULT_BODY_WORDS = " ".join(f"word{i}" for i in range(550))
+SECOND_BODY_WORDS = " ".join(f"secondword{i}" for i in range(550))
+
 START_HTML = """
 <html><head><title>Home</title></head><body>
 <a href="/ok">ok</a>
@@ -158,6 +161,11 @@ class SeoAuditTests(unittest.TestCase):
                 ),
                 1,
             )
+            html = html.replace(
+                "</body>",
+                f"<p>{DEFAULT_BODY_WORDS}</p></body>",
+                1,
+            )
 
         def fake_get(url, **_):
             if url.endswith("/robots.txt"):
@@ -251,6 +259,11 @@ class DuplicateSeoAuditTests(unittest.TestCase):
                 ),
                 1,
             )
+            first_html = first_html.replace(
+                "</body>",
+                f"<p>{DEFAULT_BODY_WORDS}</p></body>",
+                1,
+            )
         if "text/html" in second_content_type and 'rel="canonical"' not in second_html:
             second_html = second_html.replace(
                 "<head>",
@@ -260,6 +273,11 @@ class DuplicateSeoAuditTests(unittest.TestCase):
                     '{"@context":"https://schema.org","@type":"WebPage"}'
                     "</script>"
                 ),
+                1,
+            )
+            second_html = second_html.replace(
+                "</body>",
+                f"<p>{SECOND_BODY_WORDS}</p></body>",
                 1,
             )
 
@@ -422,6 +440,11 @@ class ImageSeoAuditTests(unittest.TestCase):
                     '{"@context":"https://schema.org","@type":"WebPage"}'
                     "</script>"
                 ),
+                1,
+            )
+            html = html.replace(
+                "</body>",
+                f"<p>{DEFAULT_BODY_WORDS}</p></body>",
                 1,
             )
 
@@ -677,7 +700,7 @@ class BrokenImageDetectionTests(unittest.TestCase):
             '<script type="application/ld+json">'
             '{"@context":"https://schema.org","@type":"WebPage"}'
             "</script></head>"
-            '<body><h1>Heading</h1><img src="/timeout.png" alt="Timeout"></body></html>'
+            f'<body><h1>Heading</h1><p>{DEFAULT_BODY_WORDS}</p><img src="/timeout.png" alt="Timeout"></body></html>'
         )
 
         def fake_get(url, **_):
@@ -723,7 +746,7 @@ class UrlSeoAuditTests(unittest.TestCase):
     COMPLETE_HTML = (
         '<html><head><title>Valid Title</title>'
         '<meta name="description" content="Valid description"></head>'
-        "<body><h1>Valid H1</h1></body></html>"
+        f"<body><h1>Valid H1</h1><p>{DEFAULT_BODY_WORDS}</p></body></html>"
     )
 
     def crawl_url(self, target_url: str, **kwargs):
@@ -841,7 +864,7 @@ class RedirectAuditTests(unittest.TestCase):
             '<script type="application/ld+json">'
             '{"@context":"https://schema.org","@type":"WebPage"}'
             "</script></head>"
-            f"<body><h1>Home Heading</h1>{links_html}</body></html>"
+            f"<body><h1>Home Heading</h1><p>{DEFAULT_BODY_WORDS}</p>{links_html}</body></html>"
         )
         head_calls: list[str] = []
 
@@ -1101,7 +1124,7 @@ class CanonicalSeoAuditTests(unittest.TestCase):
             '{"@context":"https://schema.org","@type":"WebPage"}'
             "</script>"
             f"{head_tags}</head>"
-            f"<body><h1>Page Heading</h1></body></html>"
+            f"<body><h1>Page Heading</h1><p>{DEFAULT_BODY_WORDS}</p></body></html>"
         )
         head_calls: list[str] = []
 
@@ -1305,7 +1328,7 @@ class RobotsSeoAuditTests(unittest.TestCase):
             '{"@context":"https://schema.org","@type":"WebPage"}'
             "</script>"
             f"{meta_tags}</head>"
-            f"<body><h1>Page Heading</h1></body></html>"
+            f"<body><h1>Page Heading</h1><p>{DEFAULT_BODY_WORDS}</p></body></html>"
         )
         headers: list[tuple[str, str]] = [("content-type", content_type)]
         if isinstance(x_robots_headers, str):
@@ -1476,7 +1499,7 @@ class StructuredDataSeoAuditTests(unittest.TestCase):
             f'<meta name="description" content="Page description">'
             f'<link rel="canonical" href="{START_URL}">'
             f"{scripts_html}</head>"
-            f"<body><h1>Page Heading</h1></body></html>"
+            f"<body><h1>Page Heading</h1><p>{DEFAULT_BODY_WORDS}</p></body></html>"
         )
 
         def fake_get(url, **_):
@@ -1644,6 +1667,240 @@ class StructuredDataSeoAuditTests(unittest.TestCase):
     def test_non_html_page_is_excluded_from_structured_data_audit(self):
         page = self.crawl_page_with_scripts(
             "",
+            content_type="application/json",
+        )
+        self.assertEqual(page["seo_issues"], [])
+
+
+class ContentQualitySeoAuditTests(unittest.TestCase):
+    def build_html(
+        self,
+        body_inner_html: str,
+        canonical_url: str = START_URL,
+        title: str = "Page Title",
+        description: str = "Page description",
+    ) -> str:
+        return (
+            f"<html><head><title>{title}</title>"
+            f'<meta name="description" content="{description}">'
+            f'<link rel="canonical" href="{canonical_url}">'
+            '<script type="application/ld+json">'
+            '{"@context":"https://schema.org","@type":"WebPage"}'
+            "</script></head>"
+            f"<body>{body_inner_html}</body></html>"
+        )
+
+    def crawl_single_page(
+        self,
+        body_inner_html: str,
+        content_type: str = "text/html; charset=utf-8",
+    ):
+        html = self.build_html(body_inner_html)
+
+        def fake_get(url, **_):
+            if url.endswith("/robots.txt"):
+                return make_response("GET", url, 200, ROBOTS_TXT)
+            return httpx.Response(
+                200,
+                text=html,
+                headers={"content-type": content_type},
+                request=httpx.Request("GET", url),
+            )
+
+        with patch("crawler.httpx.get", side_effect=fake_get), \
+             patch("crawler.time.sleep"):
+            pages = crawler.crawl_website(START_URL, max_pages=1, max_depth=0)
+        return pages[0]
+
+    def test_missing_content_is_detected_when_no_meaningful_visible_text(self):
+        page = self.crawl_single_page(
+            "<!-- comment only -->"
+            "<script>const words = '" + (" ".join(["scriptword"] * 600)) + "';</script>"
+            "<style>body { content: '" + (" ".join(["styleword"] * 600)) + "'; }</style>"
+            "<noscript>" + (" ".join(["noscriptword"] * 600)) + "</noscript>"
+            "<svg><text>" + (" ".join(["svgword"] * 600)) + "</text></svg>"
+            "<p>   ... --- !!!   </p>"
+        )
+        content_issues = [
+            issue
+            for issue in page["seo_issues"]
+            if issue["type"]
+            in (
+                "missing_content",
+                "thin_content",
+                "low_word_count",
+                "excessive_word_count",
+            )
+        ]
+        self.assertEqual(len(content_issues), 1)
+        issue = content_issues[0]
+        self.assertEqual(issue["type"], "missing_content")
+        self.assertEqual(issue["severity"], "warning")
+        self.assertEqual(issue["url"], START_URL)
+        self.assertEqual(issue["word_count"], 0)
+
+    def test_thin_content_is_detected_without_duplicate_low_word_count(self):
+        words_120 = " ".join(f"topic{i}" for i in range(119))
+        page = self.crawl_single_page(f"<h1>Heading</h1><p>{words_120}</p>")
+        self.assertEqual(len(page["seo_issues"]), 1)
+        issue = page["seo_issues"][0]
+        self.assertEqual(issue["type"], "thin_content")
+        self.assertEqual(issue["severity"], "warning")
+        self.assertEqual(issue["url"], START_URL)
+        self.assertEqual(issue["word_count"], 120)
+        self.assertIn("120", issue["message"])
+
+        # Boundary: 299 meaningful words is still thin_content
+        words_299 = " ".join(f"item{i}" for i in range(298))
+        boundary_page = self.crawl_single_page(
+            f"<h1>Heading</h1><p>{words_299}</p>"
+        )
+        self.assertEqual(
+            [i["type"] for i in boundary_page["seo_issues"]],
+            ["thin_content"],
+        )
+        self.assertEqual(boundary_page["seo_issues"][0]["word_count"], 299)
+
+    def test_low_word_count_is_detected_as_info_between_300_and_499_words(self):
+        # Boundary: 300 meaningful words triggers low_word_count (not thin_content)
+        words_300 = " ".join(f"term{i}" for i in range(299))
+        page_300 = self.crawl_single_page(f"<h1>Heading</h1><p>{words_300}</p>")
+        self.assertEqual(len(page_300["seo_issues"]), 1)
+        issue_300 = page_300["seo_issues"][0]
+        self.assertEqual(issue_300["type"], "low_word_count")
+        self.assertEqual(issue_300["severity"], "info")
+        self.assertEqual(issue_300["url"], START_URL)
+        self.assertEqual(issue_300["word_count"], 300)
+
+        # Boundary: 499 meaningful words triggers low_word_count
+        words_499 = " ".join(f"term{i}" for i in range(498))
+        page_499 = self.crawl_single_page(f"<h1>Heading</h1><p>{words_499}</p>")
+        self.assertEqual(
+            [i["type"] for i in page_499["seo_issues"]],
+            ["low_word_count"],
+        )
+        self.assertEqual(page_499["seo_issues"][0]["word_count"], 499)
+
+    def test_normal_word_count_between_500_and_3000_produces_no_issues(self):
+        for total_words in (500, 1200, 3000):
+            paragraph = " ".join(f"normal{i}" for i in range(total_words - 1))
+            page = self.crawl_single_page(f"<h1>Heading</h1><p>{paragraph}</p>")
+            self.assertEqual(
+                page["seo_issues"],
+                [],
+                msg=f"Unexpected issues for {total_words} words",
+            )
+
+    def test_excessive_word_count_over_3000_is_detected(self):
+        paragraph = " ".join(f"longword{i}" for i in range(3000))
+        page = self.crawl_single_page(f"<h1>Heading</h1><p>{paragraph}</p>")
+        self.assertEqual(len(page["seo_issues"]), 1)
+        issue = page["seo_issues"][0]
+        self.assertEqual(issue["type"], "excessive_word_count")
+        self.assertEqual(issue["severity"], "warning")
+        self.assertEqual(issue["url"], START_URL)
+        self.assertEqual(issue["word_count"], 3001)
+        self.assertIn("3001", issue["message"])
+
+    def test_script_style_noscript_and_svg_are_excluded_from_word_count(self):
+        visible_words = " ".join(f"visible{i}" for i in range(549))
+        ignored_words = " ".join(f"hidden{i}" for i in range(3000))
+        page = self.crawl_single_page(
+            f"<h1>Heading</h1><p>{visible_words}</p>"
+            f"<script>{ignored_words}</script>"
+            f"<style>{ignored_words}</style>"
+            f"<noscript>{ignored_words}</noscript>"
+            f"<svg><text>{ignored_words}</text></svg>"
+        )
+        self.assertEqual(page["seo_issues"], [])
+
+    def test_duplicate_content_detected_across_multiple_urls_with_normalization(self):
+        page_two_url = "https://example.com/page-2"
+        shared_words = [f"sharedArticleWord{i}" for i in range(500)]
+        text_one = "   ".join(shared_words)
+        text_two = "\n\t ".join(word.lower() for word in shared_words)
+
+        html_one = self.build_html(
+            f'<h1>Same Heading</h1><p>{text_one}</p>'
+            '<script>console.log("page 1 script");</script>'
+            '<a href="/page-2">Next</a>',
+            canonical_url=START_URL,
+            title="Title One",
+            description="Description One",
+        )
+        html_two = self.build_html(
+            f"<h1>same   heading</h1><p>{text_two}</p>"
+            '<style>.page2 { display: block; }</style>'
+            '<a href="/page-2"> next </a>',
+            canonical_url=page_two_url,
+            title="Title Two",
+            description="Description Two",
+        )
+
+        def fake_get(url, **_):
+            if url.endswith("/robots.txt"):
+                return make_response("GET", url, 200, ROBOTS_TXT)
+            if url == START_URL:
+                return make_response("GET", url, 200, html_one)
+            return make_response("GET", url, 200, html_two)
+
+        with patch("crawler.httpx.get", side_effect=fake_get), \
+             patch("crawler.httpx.head", return_value=make_response("HEAD", page_two_url, 200)), \
+             patch("crawler.time.sleep"):
+            pages = crawler.crawl_website(START_URL, max_pages=2, max_depth=1)
+
+        self.assertEqual(len(pages), 2)
+        for page in pages:
+            dup_issues = [
+                i for i in page["seo_issues"] if i["type"] == "duplicate_content"
+            ]
+            self.assertEqual(len(dup_issues), 1)
+            issue = dup_issues[0]
+            self.assertEqual(issue["severity"], "warning")
+            self.assertEqual(issue["url"], page["url"])
+            self.assertEqual(issue["word_count"], 503)
+            self.assertEqual(
+                issue["duplicate_urls"],
+                [START_URL, page_two_url],
+            )
+            self.assertIn(START_URL, issue["message"])
+            self.assertIn(page_two_url, issue["message"])
+
+    def test_empty_pages_are_not_flagged_as_duplicate_content(self):
+        page_two_url = "https://example.com/page-2"
+        html_one = self.build_html(
+            '<a href="/page-2">   </a>',
+            canonical_url=START_URL,
+            title="Title 1",
+            description="Desc 1",
+        )
+        html_two = self.build_html(
+            "<script>const x = 1;</script>",
+            canonical_url=page_two_url,
+            title="Title 2",
+            description="Desc 2",
+        )
+
+        def fake_get(url, **_):
+            if url.endswith("/robots.txt"):
+                return make_response("GET", url, 200, ROBOTS_TXT)
+            if url == START_URL:
+                return make_response("GET", url, 200, html_one)
+            return make_response("GET", url, 200, html_two)
+
+        with patch("crawler.httpx.get", side_effect=fake_get), \
+             patch("crawler.httpx.head", return_value=make_response("HEAD", page_two_url, 200)), \
+             patch("crawler.time.sleep"):
+            pages = crawler.crawl_website(START_URL, max_pages=2, max_depth=1)
+
+        for page in pages:
+            issue_types = [i["type"] for i in page["seo_issues"]]
+            self.assertIn("missing_content", issue_types)
+            self.assertNotIn("duplicate_content", issue_types)
+
+    def test_non_html_page_is_excluded_from_content_quality_audit(self):
+        page = self.crawl_single_page(
+            "short text",
             content_type="application/json",
         )
         self.assertEqual(page["seo_issues"], [])

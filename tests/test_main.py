@@ -84,6 +84,13 @@ SAMPLE_PAGE = {
             "url": "https://example.com/",
             "schema_types": ["Organization"],
         },
+        {
+            "type": "thin_content",
+            "severity": "warning",
+            "message": "Page has thin content (120 words; minimum recommended is 300 words).",
+            "url": "https://example.com/",
+            "word_count": 120,
+        },
     ],
     "error": None,
 }
@@ -161,6 +168,7 @@ class FastAPIEndpointTests(unittest.TestCase):
                 "cross_domain_canonical",
                 "noindex_page",
                 "duplicate_schema_type",
+                "thin_content",
             ],
         )
         self.assertEqual(
@@ -174,6 +182,10 @@ class FastAPIEndpointTests(unittest.TestCase):
         self.assertEqual(
             data["pages"][0]["seo_issues"][8]["schema_types"],
             ["Organization"],
+        )
+        self.assertEqual(
+            data["pages"][0]["seo_issues"][9]["word_count"],
+            120,
         )
         self.assertEqual(
             data["pages"][0]["seo_issues"][6]["canonical_url"],

@@ -456,6 +456,7 @@ function App() {
                   <th>Canonical URL</th>
                   <th>Robots Directive</th>
                   <th>Schema Types</th>
+                  <th>Word Count</th>
                   <th>Source URL</th>
                   <th>Destination URL</th>
                   <th>Redirect Chain</th>
@@ -467,7 +468,7 @@ function App() {
               <tbody>
                 {seoIssues.map((issue) => (
                   <tr
-                    key={`${issue.url}-${issue.type}-${issue.canonical_url || ""}-${issue.robots_directive || ""}-${issue.directive_source || ""}-${Array.isArray(issue.schema_types) ? issue.schema_types.join(",") : ""}-${issue.image_url || ""}-${issue.source_url || ""}`}
+                    key={`${issue.url}-${issue.type}-${issue.canonical_url || ""}-${issue.robots_directive || ""}-${issue.directive_source || ""}-${Array.isArray(issue.schema_types) ? issue.schema_types.join(",") : ""}-${issue.word_count ?? ""}-${issue.image_url || ""}-${issue.source_url || ""}`}
                   >
                     <td className="url-cell">
                       <a
@@ -526,6 +527,12 @@ function App() {
                       ) : (
                         "—"
                       )}
+                    </td>
+                    <td>
+                      {issue.word_count !== undefined &&
+                      issue.word_count !== null
+                        ? issue.word_count
+                        : "—"}
                     </td>
                     <td className="url-cell">
                       {issue.source_url ? (

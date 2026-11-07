@@ -8,6 +8,7 @@ from urllib.robotparser import RobotFileParser
 
 import httpx
 from bs4 import BeautifulSoup
+from bs4.element import CData, Comment, Declaration, ProcessingInstruction
 
 from exporter import (
     export_links_to_csv,
@@ -1202,6 +1203,213 @@ def detect_structured_data_seo_issues(
     return issues
 
 
+_NON_VISIBLE_TAGS = {
+    "script",
+    "style",
+    "noscript",
+    "svg",
+    "template",
+    "head",
+    "title",
+    "meta",
+    "link",
+    "iframe",
+    "canvas",
+    "object",
+}
+
+
+def extract_visible_text(soup: BeautifulSoup) -> str:
+    """Extract normalized visible text from parsed HTML, excluding non-visible elements."""
+    chunks: list[str] = []
+    root = soup.body if soup.body is not None else soup
+
+    for text_node in root.find_all(string=True):
+        if isinstance(
+            text_node,
+            (Comment, Declaration, ProcessingInstruction, CData),
+        ):
+            continue
+
+        skip_node = False
+        parent = text_node.parent
+        while parent is not None:
+            parent_name = getattr(parent, "name", None)
+            if (
+                isinstance(parent_name, str)
+                and parent_name.lower() in _NON_VISIBLE_TAGS
+            ):
+                skip_node = True
+                break
+            parent = getattr(parent, "parent", None)
+
+        if skip_node:
+            continue
+
+        cleaned_chunk = str(text_node).strip()
+        if cleaned_chunk:
+            chunks.append(cleaned_chunk)
+
+    return " ".join(" ".join(chunks).split())
+
+
+def extract_meaningful_words(visible_text: str) -> list[str]:
+    """Return meaningful word tokens containing at least one alphanumeric character."""
+    if not visible_text:
+        return []
+    return [
+        token
+        for token in visible_text.split()
+        if any(char.isalnum() for char in token)
+    ]
+
+
+def normalize_visible_content(visible_text: str | None) -> str | None:
+    """Normalize visible text for duplicate comparison; return None if no meaningful words."""
+    if not visible_text:
+        return None
+    words = extract_meaningful_words(visible_text)
+    if not words:
+        return None
+    return " ".join(visible_text.split()).casefold()
+
+
+def detect_content_quality_seo_issues(
+    url: str,
+    soup: BeautifulSoup,
+    content_type: str | None,
+    visible_text: str | None = None,
+    thin_content_threshold: int = 300,
+    low_word_count_threshold: int = 500,
+    excessive_word_count_threshold: int = 3000,
+) -> list[dict[str, Any]]:
+    if not is_html_content(content_type):
+        return []
+
+    text = (
+        visible_text
+        if visible_text is not None
+        else extract_visible_text(soup)
+    )
+    words = extract_meaningful_words(text)
+    word_count = len(words)
+
+    if word_count == 0:
+        return [
+            {
+                "type": "missing_content",
+                "severity": "warning",
+                "message": (
+                    "Page contains no meaningful visible text content "
+                    "(0 words)."
+                ),
+                "url": url,
+                "word_count": 0,
+            }
+        ]
+
+    if word_count < thin_content_threshold:
+        return [
+            {
+                "type": "thin_content",
+                "severity": "warning",
+                "message": (
+                    f"Page has thin content ({word_count} words; minimum "
+                    f"recommended is {thin_content_threshold} words)."
+                ),
+                "url": url,
+                "word_count": word_count,
+            }
+        ]
+
+    if word_count < low_word_count_threshold:
+        return [
+            {
+                "type": "low_word_count",
+                "severity": "info",
+                "message": (
+                    f"Page has a low word count ({word_count} words; "
+                    f"recommended is at least {low_word_count_threshold} words)."
+                ),
+                "url": url,
+                "word_count": word_count,
+            }
+        ]
+
+    if word_count > excessive_word_count_threshold:
+        return [
+            {
+                "type": "excessive_word_count",
+                "severity": "warning",
+                "message": (
+                    f"Page has an excessive word count ({word_count} words; "
+                    "maximum recommended is "
+                    f"{excessive_word_count_threshold} words)."
+                ),
+                "url": url,
+                "word_count": word_count,
+            }
+        ]
+
+    return []
+
+
+def detect_duplicate_content_issues(
+    results: list[dict[str, Any]],
+    page_contents: dict[str, tuple[str | None, int]] | None = None,
+) -> None:
+    html_pages = [
+        page
+        for page in results
+        if page.get("error") is None and is_html_content(page.get("content_type"))
+    ]
+
+    groups: dict[str, list[tuple[dict[str, Any], int]]] = {}
+    for page in html_pages:
+        page_url = page["url"]
+        normalized_text: str | None = None
+        word_count = 0
+
+        if page_contents is not None and page_url in page_contents:
+            normalized_text, word_count = page_contents[page_url]
+        elif "visible_text" in page:
+            raw_vis = page.get("visible_text") or ""
+            normalized_text = normalize_visible_content(raw_vis)
+            word_count = len(extract_meaningful_words(raw_vis))
+
+        if normalized_text is None or word_count == 0:
+            continue
+
+        groups.setdefault(normalized_text, []).append((page, word_count))
+
+    for matching_entries in groups.values():
+        if len(matching_entries) < 2:
+            continue
+
+        affected_urls = [page["url"] for page, _ in matching_entries]
+        urls_text = ", ".join(affected_urls)
+
+        for page, word_count in matching_entries:
+            seo_issues = page.setdefault("seo_issues", [])
+            existing_types = {issue["type"] for issue in seo_issues}
+            if "duplicate_content" in existing_types:
+                continue
+
+            seo_issues.append(
+                {
+                    "type": "duplicate_content",
+                    "severity": "warning",
+                    "message": (
+                        f"Page visible text content ({word_count} words) is "
+                        f"duplicated across pages: {urls_text}"
+                    ),
+                    "url": page["url"],
+                    "word_count": word_count,
+                    "duplicate_urls": list(affected_urls),
+                }
+            )
+
+
 def normalize_metadata_value(
     value: str | None,
     is_title: bool = False,
@@ -1296,6 +1504,7 @@ def crawl_website(
     checked_images: dict[str, tuple[int | None, str | None]] = {}
     initial_link_hops: dict[str, tuple[int | None, str | None, str | None]] = {}
     checked_redirects: dict[str, dict[str, Any] | None] = {}
+    page_contents: dict[str, tuple[str | None, int]] = {}
 
     parsed_start_url = urlparse(clean_start_url)
     target_hostname = parsed_start_url.hostname
@@ -1581,6 +1790,19 @@ def crawl_website(
                     content_type=content_type,
                 )
             )
+            if is_html_content(content_type):
+                visible_text = extract_visible_text(soup)
+                normalized_content = normalize_visible_content(visible_text)
+                word_count = len(extract_meaningful_words(visible_text))
+                page_contents[current_url] = (normalized_content, word_count)
+                seo_issues.extend(
+                    detect_content_quality_seo_issues(
+                        url=current_url,
+                        soup=soup,
+                        content_type=content_type,
+                        visible_text=visible_text,
+                    )
+                )
 
         except httpx.RequestError as error:
             results.append(
@@ -1624,6 +1846,7 @@ def crawl_website(
             )
 
     detect_duplicate_seo_issues(results)
+    detect_duplicate_content_issues(results, page_contents)
 
     successful_pages = sum(1 for item in results if item["error"] is None)
     print(
