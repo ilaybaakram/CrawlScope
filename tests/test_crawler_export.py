@@ -140,6 +140,7 @@ class RunCrawlAndExportTests(unittest.TestCase):
                 "link_results",
                 "max_image_checks",
                 "max_url_length",
+                "max_redirect_checks",
             ],
         )
 

@@ -16,18 +16,32 @@ from exporter import (
 )
 
 
-def check_link(url: str, headers: dict[str, str]) -> tuple[int | None, str | None]:
-    """Return (status_code, error) for a link without following redirects."""
+def _request_link_hop(
+    url: str,
+    headers: dict[str, str],
+) -> tuple[int | None, str | None, str | None]:
+    """Return (status_code, location, error) for a single URL hop without following redirects."""
     try:
         response = httpx.head(url, headers=headers, timeout=10.0)
         if response.status_code in (405, 501):
             # Some servers do not support HEAD, so fall back to GET without
             # downloading the response body.
             with httpx.stream("GET", url, headers=headers, timeout=10.0) as get_response:
-                return get_response.status_code, None
-        return response.status_code, None
+                response_headers = getattr(get_response, "headers", {})
+                return (
+                    get_response.status_code,
+                    response_headers.get("location"),
+                    None,
+                )
+        return response.status_code, response.headers.get("location"), None
     except httpx.RequestError as error:
-        return None, str(error)
+        return None, None, str(error)
+
+
+def check_link(url: str, headers: dict[str, str]) -> tuple[int | None, str | None]:
+    """Return (status_code, error) for a link without following redirects."""
+    status_code, _, error = _request_link_hop(url, headers)
+    return status_code, error
 
 
 def classify_link(status_code: int | None, error: str | None) -> str:
@@ -273,6 +287,112 @@ def detect_broken_image_issues(
     return broken_issues
 
 
+def trace_redirect_chain(
+    source_url: str,
+    headers: dict[str, str],
+    delay_seconds: float = 1.0,
+    max_hops: int = 10,
+    initial_hop: tuple[int | None, str | None, str | None] | None = None,
+) -> dict[str, Any] | None:
+    if initial_hop is not None:
+        status_code, location, error = initial_hop
+    else:
+        status_code, location, error = _request_link_hop(source_url, headers)
+
+    if error is not None or status_code is None:
+        return None
+
+    if not (300 <= status_code < 400) or not location or not location.strip():
+        return None
+
+    first_status_code = status_code
+    chain: list[str] = [source_url]
+    visited_in_chain: set[str] = {source_url}
+    current_hop_url = source_url
+    next_location = location.strip()
+    final_status_code: int | None = status_code
+
+    while len(chain) <= max_hops:
+        resolved_next = urljoin(current_hop_url, next_location)
+        clean_next_url, _ = urldefrag(resolved_next)
+        parsed_next = urlparse(clean_next_url)
+
+        if parsed_next.scheme not in ("http", "https"):
+            break
+
+        chain.append(clean_next_url)
+
+        if clean_next_url in visited_in_chain:
+            chain_text = " -> ".join(chain)
+            return {
+                "type": "redirect_loop",
+                "severity": "error",
+                "message": f"Redirect loop detected: {chain_text}",
+                "source_url": source_url,
+                "destination_url": None,
+                "redirect_chain": chain,
+                "status_code": None,
+            }
+
+        visited_in_chain.add(clean_next_url)
+
+        if delay_seconds > 0:
+            time.sleep(delay_seconds)
+
+        hop_status, hop_location, hop_error = _request_link_hop(
+            clean_next_url, headers
+        )
+        if hop_error is not None or hop_status is None:
+            final_status_code = None
+            break
+
+        final_status_code = hop_status
+        if 300 <= hop_status < 400 and hop_location and hop_location.strip():
+            current_hop_url = clean_next_url
+            next_location = hop_location.strip()
+            continue
+
+        break
+
+    if len(chain) < 2:
+        return None
+
+    destination_url = chain[-1]
+    chain_text = " -> ".join(chain)
+    status_suffix = (
+        f"final HTTP {final_status_code}"
+        if final_status_code is not None
+        else "final request failed"
+    )
+
+    if len(chain) > 2:
+        return {
+            "type": "redirect_chain",
+            "severity": "warning",
+            "message": (
+                f"Redirect chain ({len(chain) - 1} hops, {status_suffix}): "
+                f"{chain_text}"
+            ),
+            "source_url": source_url,
+            "destination_url": destination_url,
+            "redirect_chain": chain,
+            "status_code": final_status_code,
+        }
+
+    return {
+        "type": "redirect_url",
+        "severity": "info",
+        "message": (
+            f"Redirecting URL (HTTP {first_status_code}, {status_suffix}): "
+            f"{chain_text}"
+        ),
+        "source_url": source_url,
+        "destination_url": destination_url,
+        "redirect_chain": chain,
+        "status_code": final_status_code,
+    }
+
+
 def normalize_metadata_value(
     value: str | None,
     is_title: bool = False,
@@ -352,6 +472,7 @@ def crawl_website(
     link_results: list[dict[str, Any]] | None = None,
     max_image_checks: int = 50,
     max_url_length: int = 100,
+    max_redirect_checks: int = 50,
 ) -> list[dict[str, Any]]:
     clean_start_url, _ = urldefrag(start_url)
     queue = deque([(clean_start_url, 0)])
@@ -364,6 +485,8 @@ def crawl_website(
     checked_links = set()
     link_requests_made = 0
     checked_images: dict[str, tuple[int | None, str | None]] = {}
+    initial_link_hops: dict[str, tuple[int | None, str | None, str | None]] = {}
+    checked_redirects: dict[str, dict[str, Any] | None] = {}
 
     parsed_start_url = urlparse(clean_start_url)
     target_hostname = parsed_start_url.hostname
@@ -551,7 +674,15 @@ def crawl_website(
                     if delay_seconds > 0:
                         time.sleep(delay_seconds)
                     link_requests_made += 1
-                    status_code, error = check_link(link_url, headers)
+                    hop_status, hop_location, hop_error = _request_link_hop(
+                        link_url, headers
+                    )
+                    initial_link_hops[link_url] = (
+                        hop_status,
+                        hop_location,
+                        hop_error,
+                    )
+                    status_code, error = hop_status, hop_error
 
                 checked_links.add(link_url)
                 link_result = classify_link(status_code, error)
@@ -568,6 +699,50 @@ def crawl_website(
                     f"    Link {link_result.upper()}: {link_url} "
                     f"| Status: {status_code}"
                 )
+
+            seen_redirect_sources: set[str] = set()
+            for link_url in sorted(discovered_urls):
+                if link_url in seen_redirect_sources:
+                    continue
+                seen_redirect_sources.add(link_url)
+
+                if not robot_parser.can_fetch(user_agent, link_url):
+                    continue
+
+                if link_url in checked_redirects:
+                    redirect_finding = checked_redirects[link_url]
+                else:
+                    if len(checked_redirects) >= max_redirect_checks:
+                        continue
+                    if link_url in crawled_pages:
+                        checked_redirects[link_url] = None
+                        continue
+                    if link_url not in initial_link_hops:
+                        continue
+
+                    redirect_finding = trace_redirect_chain(
+                        source_url=link_url,
+                        headers=headers,
+                        delay_seconds=delay_seconds,
+                        initial_hop=initial_link_hops[link_url],
+                    )
+                    checked_redirects[link_url] = redirect_finding
+
+                if redirect_finding is not None:
+                    seo_issues.append(
+                        {
+                            "type": redirect_finding["type"],
+                            "severity": redirect_finding["severity"],
+                            "message": redirect_finding["message"],
+                            "url": current_url,
+                            "source_url": redirect_finding["source_url"],
+                            "destination_url": redirect_finding["destination_url"],
+                            "redirect_chain": list(
+                                redirect_finding["redirect_chain"]
+                            ),
+                            "status_code": redirect_finding["status_code"],
+                        }
+                    )
 
         except httpx.RequestError as error:
             results.append(

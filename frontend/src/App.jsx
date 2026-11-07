@@ -453,6 +453,9 @@ function App() {
                   <th>Page URL</th>
                   <th>Issue Type</th>
                   <th>Severity</th>
+                  <th>Source URL</th>
+                  <th>Destination URL</th>
+                  <th>Redirect Chain</th>
                   <th>Image URL</th>
                   <th>HTTP Status</th>
                   <th>Message</th>
@@ -461,7 +464,7 @@ function App() {
               <tbody>
                 {seoIssues.map((issue) => (
                   <tr
-                    key={`${issue.url}-${issue.type}-${issue.image_url || ""}`}
+                    key={`${issue.url}-${issue.type}-${issue.image_url || ""}-${issue.source_url || ""}`}
                   >
                     <td className="url-cell">
                       <a
@@ -478,13 +481,47 @@ function App() {
                     <td>
                       <span
                         className={
-                          issue.severity === "info"
-                            ? "status-pill status-info"
-                            : "status-pill status-warning"
+                          issue.severity === "error"
+                            ? "status-pill status-bad"
+                            : issue.severity === "info"
+                              ? "status-pill status-info"
+                              : "status-pill status-warning"
                         }
                       >
                         {issue.severity}
                       </span>
+                    </td>
+                    <td className="url-cell">
+                      {issue.source_url ? (
+                        <a
+                          href={issue.source_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          {issue.source_url}
+                        </a>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
+                    <td className="url-cell">
+                      {issue.destination_url ? (
+                        <a
+                          href={issue.destination_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          {issue.destination_url}
+                        </a>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
+                    <td className="url-cell">
+                      {Array.isArray(issue.redirect_chain) &&
+                      issue.redirect_chain.length > 0
+                        ? issue.redirect_chain.join(" → ")
+                        : "—"}
                     </td>
                     <td className="url-cell">
                       {issue.image_url ? (
@@ -502,7 +539,13 @@ function App() {
                     <td>
                       {issue.status_code !== undefined &&
                       issue.status_code !== null ? (
-                        <span className="status-pill status-bad">
+                        <span
+                          className={
+                            issue.status_code < 400
+                              ? "status-pill status-ok"
+                              : "status-pill status-bad"
+                          }
+                        >
                           {issue.status_code}
                         </span>
                       ) : (

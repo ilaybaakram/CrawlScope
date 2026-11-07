@@ -48,6 +48,20 @@ SAMPLE_PAGE = {
             "message": "URL path contains underscores instead of hyphens: /seo_guide",
             "url": "https://example.com/seo_guide",
         },
+        {
+            "type": "redirect_chain",
+            "severity": "warning",
+            "message": "Redirect chain (2 hops, final HTTP 200): https://example.com/old -> https://example.com/mid -> https://example.com/new",
+            "url": "https://example.com/",
+            "source_url": "https://example.com/old",
+            "destination_url": "https://example.com/new",
+            "redirect_chain": [
+                "https://example.com/old",
+                "https://example.com/mid",
+                "https://example.com/new",
+            ],
+            "status_code": 200,
+        },
     ],
     "error": None,
 }
@@ -121,7 +135,12 @@ class FastAPIEndpointTests(unittest.TestCase):
                 "missing_image_alt",
                 "broken_image",
                 "underscore_url",
+                "redirect_chain",
             ],
+        )
+        self.assertEqual(
+            data["pages"][0]["seo_issues"][5]["destination_url"],
+            "https://example.com/new",
         )
         self.assertEqual(
             data["pages"][0]["seo_issues"][2]["image_url"],

@@ -751,6 +751,261 @@ class UrlSeoAuditTests(unittest.TestCase):
         self.assertEqual(page["seo_issues"], [])
 
 
+class RedirectAuditTests(unittest.TestCase):
+    def make_head_response(
+        self,
+        url: str,
+        status: int,
+        location: str | None = None,
+    ) -> httpx.Response:
+        headers = {"content-type": "text/html"}
+        if location is not None:
+            headers["location"] = location
+        return httpx.Response(
+            status,
+            headers=headers,
+            request=httpx.Request("HEAD", url),
+        )
+
+    def crawl_with_links(
+        self,
+        links_html: str,
+        head_map: dict[str, httpx.Response | Exception],
+        **kwargs,
+    ):
+        html = (
+            '<html><head><title>Home</title>'
+            '<meta name="description" content="Home description"></head>'
+            f"<body><h1>Home Heading</h1>{links_html}</body></html>"
+        )
+        head_calls: list[str] = []
+
+        def fake_get(url, **_):
+            if url.endswith("/robots.txt"):
+                return make_response("GET", url, 200, ROBOTS_TXT)
+            return make_response("GET", url, 200, html)
+
+        def fake_head(url, **_):
+            head_calls.append(url)
+            outcome = head_map[url]
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+        with patch("crawler.httpx.get", side_effect=fake_get), \
+             patch("crawler.httpx.head", side_effect=fake_head), \
+             patch("crawler.time.sleep"):
+            pages = crawler.crawl_website(
+                START_URL,
+                max_pages=1,
+                max_depth=0,
+                **kwargs,
+            )
+        return pages[0], head_calls
+
+    def test_internal_link_301_and_302_redirects_ending_in_200_and_404(self):
+        head_map = {
+            "https://example.com/old-301": self.make_head_response(
+                "https://example.com/old-301", 301, "/new-200"
+            ),
+            "https://example.com/new-200": self.make_head_response(
+                "https://example.com/new-200", 200
+            ),
+            "https://example.com/old-302": self.make_head_response(
+                "https://example.com/old-302", 302, "/target-404"
+            ),
+            "https://example.com/target-404": self.make_head_response(
+                "https://example.com/target-404", 404
+            ),
+        }
+        page, _ = self.crawl_with_links(
+            '<a href="/old-301">301</a><a href="/old-302">302</a>',
+            head_map,
+        )
+        issues = {i["source_url"]: i for i in page["seo_issues"]}
+        self.assertEqual(len(issues), 2)
+
+        r301 = issues["https://example.com/old-301"]
+        self.assertEqual(r301["type"], "redirect_url")
+        self.assertEqual(r301["severity"], "info")
+        self.assertEqual(r301["url"], START_URL)
+        self.assertEqual(r301["destination_url"], "https://example.com/new-200")
+        self.assertEqual(
+            r301["redirect_chain"],
+            ["https://example.com/old-301", "https://example.com/new-200"],
+        )
+        self.assertEqual(r301["status_code"], 200)
+        self.assertIn("200", r301["message"])
+
+        r302 = issues["https://example.com/old-302"]
+        self.assertEqual(r302["type"], "redirect_url")
+        self.assertEqual(r302["severity"], "info")
+        self.assertEqual(
+            r302["destination_url"], "https://example.com/target-404"
+        )
+        self.assertEqual(r302["status_code"], 404)
+        self.assertIn("404", r302["message"])
+
+    def test_redirect_chain_with_multiple_hops(self):
+        head_map = {
+            "https://example.com/step-1": self.make_head_response(
+                "https://example.com/step-1", 301, "/step-2"
+            ),
+            "https://example.com/step-2": self.make_head_response(
+                "https://example.com/step-2", 302, "/step-3"
+            ),
+            "https://example.com/step-3": self.make_head_response(
+                "https://example.com/step-3", 200
+            ),
+        }
+        page, _ = self.crawl_with_links('<a href="/step-1">Chain</a>', head_map)
+        self.assertEqual(len(page["seo_issues"]), 1)
+        issue = page["seo_issues"][0]
+        self.assertEqual(issue["type"], "redirect_chain")
+        self.assertEqual(issue["severity"], "warning")
+        self.assertEqual(issue["url"], START_URL)
+        self.assertEqual(issue["source_url"], "https://example.com/step-1")
+        self.assertEqual(issue["destination_url"], "https://example.com/step-3")
+        expected_chain = [
+            "https://example.com/step-1",
+            "https://example.com/step-2",
+            "https://example.com/step-3",
+        ]
+        self.assertEqual(issue["redirect_chain"], expected_chain)
+        self.assertIn(" -> ".join(expected_chain), issue["message"])
+
+    def test_redirect_loop_is_detected_and_handled_gracefully(self):
+        head_map = {
+            "https://example.com/loop-a": self.make_head_response(
+                "https://example.com/loop-a", 302, "/loop-b"
+            ),
+            "https://example.com/loop-b": self.make_head_response(
+                "https://example.com/loop-b", 302, "/loop-a"
+            ),
+        }
+        page, _ = self.crawl_with_links('<a href="/loop-a">Loop</a>', head_map)
+        self.assertEqual(len(page["seo_issues"]), 1)
+        issue = page["seo_issues"][0]
+        self.assertEqual(issue["type"], "redirect_loop")
+        self.assertEqual(issue["severity"], "error")
+        self.assertEqual(issue["url"], START_URL)
+        self.assertEqual(issue["source_url"], "https://example.com/loop-a")
+        self.assertIsNone(issue["destination_url"])
+        self.assertEqual(
+            issue["redirect_chain"],
+            [
+                "https://example.com/loop-a",
+                "https://example.com/loop-b",
+                "https://example.com/loop-a",
+            ],
+        )
+
+    def test_repeated_source_url_checked_only_once_across_pages(self):
+        page_one_html = (
+            '<html><head><title>Page 1</title>'
+            '<meta name="description" content="Desc 1"></head>'
+            '<body><h1>H1 1</h1>'
+            '<a href="/legacy">Legacy</a>'
+            '<a href="/page-2">Page 2</a></body></html>'
+        )
+        page_two_html = (
+            '<html><head><title>Page 2</title>'
+            '<meta name="description" content="Desc 2"></head>'
+            '<body><h1>H1 2</h1>'
+            '<a href="/legacy">Legacy Again</a></body></html>'
+        )
+        head_calls = []
+        head_map = {
+            "https://example.com/legacy": self.make_head_response(
+                "https://example.com/legacy", 301, "/modern"
+            ),
+            "https://example.com/modern": self.make_head_response(
+                "https://example.com/modern", 200
+            ),
+            "https://example.com/page-2": self.make_head_response(
+                "https://example.com/page-2", 200
+            ),
+        }
+
+        def fake_get(url, **_):
+            if url.endswith("/robots.txt"):
+                return make_response("GET", url, 200, ROBOTS_TXT)
+            if url == START_URL:
+                return make_response("GET", url, 200, page_one_html)
+            return make_response("GET", url, 200, page_two_html)
+
+        def fake_head(url, **_):
+            head_calls.append(url)
+            return head_map[url]
+
+        with patch("crawler.httpx.get", side_effect=fake_get), \
+             patch("crawler.httpx.head", side_effect=fake_head), \
+             patch("crawler.time.sleep"):
+            pages = crawler.crawl_website(START_URL, max_pages=2, max_depth=1)
+
+        self.assertEqual(head_calls.count("https://example.com/legacy"), 1)
+        self.assertEqual(head_calls.count("https://example.com/modern"), 1)
+        for page in pages:
+            redirects = [
+                i for i in page["seo_issues"] if i["type"] == "redirect_url"
+            ]
+            self.assertEqual(len(redirects), 1)
+            self.assertEqual(redirects[0]["url"], page["url"])
+
+    def test_unique_redirect_check_limit_is_respected(self):
+        head_map = {
+            "https://example.com/r1": self.make_head_response(
+                "https://example.com/r1", 301, "/d1"
+            ),
+            "https://example.com/d1": self.make_head_response(
+                "https://example.com/d1", 200
+            ),
+            "https://example.com/r2": self.make_head_response(
+                "https://example.com/r2", 301, "/d2"
+            ),
+            "https://example.com/d2": self.make_head_response(
+                "https://example.com/d2", 200
+            ),
+            "https://example.com/r3": self.make_head_response(
+                "https://example.com/r3", 301, "/d3"
+            ),
+            "https://example.com/d3": self.make_head_response(
+                "https://example.com/d3", 200
+            ),
+        }
+        page, head_calls = self.crawl_with_links(
+            '<a href="/r1">1</a><a href="/r2">2</a><a href="/r3">3</a>',
+            head_map,
+            max_redirect_checks=2,
+        )
+        self.assertEqual(len(page["seo_issues"]), 2)
+        self.assertNotIn("https://example.com/d3", head_calls)
+
+    def test_request_failure_and_external_links_excluded(self):
+        head_map = {
+            "https://example.com/broken-conn": httpx.ConnectError("failed"),
+            "https://example.com/mid-fail": self.make_head_response(
+                "https://example.com/mid-fail", 301, "/unreachable-dest"
+            ),
+            "https://example.com/unreachable-dest": httpx.ConnectError(
+                "dest down"
+            ),
+        }
+        page, head_calls = self.crawl_with_links(
+            '<a href="/broken-conn">Fail</a>'
+            '<a href="/mid-fail">Mid Fail</a>'
+            '<a href="https://external.org/redirect">External</a>',
+            head_map,
+        )
+        self.assertNotIn("https://external.org/redirect", head_calls)
+        self.assertEqual(len(page["seo_issues"]), 1)
+        self.assertEqual(
+            page["seo_issues"][0]["source_url"],
+            "https://example.com/mid-fail",
+        )
+        self.assertIsNone(page["seo_issues"][0]["status_code"])
+
+
 if __name__ == "__main__":
     unittest.main()
 
