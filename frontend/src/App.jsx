@@ -454,6 +454,7 @@ function App() {
                   <th>Issue Type</th>
                   <th>Severity</th>
                   <th>Image URL</th>
+                  <th>HTTP Status</th>
                   <th>Message</th>
                 </tr>
               </thead>
@@ -488,6 +489,16 @@ function App() {
                         >
                           {issue.image_url}
                         </a>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
+                    <td>
+                      {issue.status_code !== undefined &&
+                      issue.status_code !== null ? (
+                        <span className="status-pill status-bad">
+                          {issue.status_code}
+                        </span>
                       ) : (
                         "—"
                       )}

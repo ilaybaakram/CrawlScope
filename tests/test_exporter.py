@@ -66,6 +66,14 @@ SAMPLE_PAGES = [
                 "url": "https://example.com/café",
                 "image_url": "https://example.com/images/cup.jpg",
             },
+            {
+                "type": "broken_image",
+                "severity": "warning",
+                "message": "Broken image (HTTP 404): https://example.com/images/broken.jpg",
+                "url": "https://example.com/café",
+                "image_url": "https://example.com/images/broken.jpg",
+                "status_code": 404,
+            },
         ],
         "error": None,
     },
@@ -189,7 +197,7 @@ class PageExportTests(ExporterTestCase):
         self.assertIn("seo_issues", rows[0])
         self.assertEqual(json.loads(rows[0]["seo_issues"]), [])
         parsed_issues = json.loads(rows[2]["seo_issues"])
-        self.assertEqual(len(parsed_issues), 4)
+        self.assertEqual(len(parsed_issues), 5)
         self.assertEqual(parsed_issues[0]["type"], "missing_meta_description")
         self.assertEqual(parsed_issues[2]["type"], "duplicate_title")
         self.assertEqual(parsed_issues[3]["type"], "missing_image_alt")
@@ -197,6 +205,8 @@ class PageExportTests(ExporterTestCase):
             parsed_issues[3]["image_url"],
             "https://example.com/images/cup.jpg",
         )
+        self.assertEqual(parsed_issues[4]["type"], "broken_image")
+        self.assertEqual(parsed_issues[4]["status_code"], 404)
 
         json_data = read_json(json_path)
         self.assertEqual(json_data[2]["seo_issues"], SAMPLE_PAGES[2]["seo_issues"])

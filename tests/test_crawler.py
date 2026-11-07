@@ -491,6 +491,184 @@ class ImageSeoAuditTests(unittest.TestCase):
         self.assertEqual(failed_page["seo_issues"], [])
 
 
+class BrokenImageDetectionTests(unittest.TestCase):
+    def test_image_404_500_and_200_statuses(self):
+        html = (
+            '<html><head><title>Title</title>'
+            '<meta name="description" content="Desc"></head>'
+            "<body><h1>Heading</h1>"
+            '<img src="/ok.png" alt="OK">'
+            '<img src="/not-found.png" alt="Missing">'
+            '<img src="//cdn.example.com/server-error.png" alt="Error">'
+            "</body></html>"
+        )
+        image_statuses = {
+            "https://example.com/ok.png": 200,
+            "https://example.com/not-found.png": 404,
+            "https://cdn.example.com/server-error.png": 500,
+        }
+
+        def fake_get(url, **_):
+            if url.endswith("/robots.txt"):
+                return make_response("GET", url, 200, ROBOTS_TXT)
+            if url == START_URL:
+                return make_response("GET", url, 200, html)
+            return make_response("GET", url, image_statuses[url])
+
+        with patch("crawler.httpx.get", side_effect=fake_get), \
+             patch("crawler.time.sleep"):
+            pages = crawler.crawl_website(START_URL, max_pages=1, max_depth=0)
+
+        broken_issues = [
+            issue
+            for issue in pages[0]["seo_issues"]
+            if issue["type"] == "broken_image"
+        ]
+        self.assertEqual(len(broken_issues), 2)
+
+        first, second = broken_issues
+        self.assertEqual(first["type"], "broken_image")
+        self.assertEqual(first["severity"], "warning")
+        self.assertEqual(first["url"], START_URL)
+        self.assertEqual(first["image_url"], "https://example.com/not-found.png")
+        self.assertEqual(first["status_code"], 404)
+        self.assertIn("404", first["message"])
+        self.assertIn("https://example.com/not-found.png", first["message"])
+
+        self.assertEqual(
+            second["image_url"],
+            "https://cdn.example.com/server-error.png",
+        )
+        self.assertEqual(second["status_code"], 500)
+        self.assertIn("500", second["message"])
+
+    def test_repeated_image_across_pages_is_checked_once_and_reused(self):
+        page_one_html = (
+            '<html><head><title>Page 1</title>'
+            '<meta name="description" content="Desc 1"></head>'
+            '<body><h1>H1 1</h1>'
+            '<img src="/shared-broken.png" alt="Shared">'
+            '<a href="/page-2">Page 2</a></body></html>'
+        )
+        page_two_html = (
+            '<html><head><title>Page 2</title>'
+            '<meta name="description" content="Desc 2"></head>'
+            '<body><h1>H1 2</h1>'
+            '<img src="/shared-broken.png" alt="Shared">'
+            "</body></html>"
+        )
+        get_calls = []
+
+        def fake_get(url, **_):
+            get_calls.append(url)
+            if url.endswith("/robots.txt"):
+                return make_response("GET", url, 200, ROBOTS_TXT)
+            if url == START_URL:
+                return make_response("GET", url, 200, page_one_html)
+            if url == "https://example.com/page-2":
+                return make_response("GET", url, 200, page_two_html)
+            if url == "https://example.com/shared-broken.png":
+                return make_response("GET", url, 404)
+            return make_response("GET", url, 200)
+
+        with patch("crawler.httpx.get", side_effect=fake_get), \
+             patch("crawler.httpx.head", return_value=make_response("HEAD", "https://example.com/page-2", 200)), \
+             patch("crawler.time.sleep"):
+            pages = crawler.crawl_website(START_URL, max_pages=2, max_depth=1)
+
+        self.assertEqual(
+            get_calls.count("https://example.com/shared-broken.png"),
+            1,
+        )
+        for page in pages:
+            broken = [
+                i for i in page["seo_issues"] if i["type"] == "broken_image"
+            ]
+            self.assertEqual(len(broken), 1)
+            self.assertEqual(broken[0]["url"], page["url"])
+            self.assertEqual(broken[0]["status_code"], 404)
+
+    def test_unique_image_check_limit_is_respected(self):
+        html = (
+            '<html><head><title>Title</title>'
+            '<meta name="description" content="Desc"></head>'
+            "<body><h1>Heading</h1>"
+            '<img src="/img1.png" alt="1">'
+            '<img src="/img2.png" alt="2">'
+            '<img src="/img3.png" alt="3">'
+            "</body></html>"
+        )
+        checked_urls = []
+
+        def fake_get(url, **_):
+            if url.endswith("/robots.txt"):
+                return make_response("GET", url, 200, ROBOTS_TXT)
+            if url == START_URL:
+                return make_response("GET", url, 200, html)
+            checked_urls.append(url)
+            return make_response("GET", url, 404)
+
+        with patch("crawler.httpx.get", side_effect=fake_get), \
+             patch("crawler.time.sleep"):
+            pages = crawler.crawl_website(
+                START_URL,
+                max_pages=1,
+                max_depth=0,
+                max_image_checks=2,
+            )
+
+        self.assertEqual(len(checked_urls), 2)
+        broken = [
+            i for i in pages[0]["seo_issues"] if i["type"] == "broken_image"
+        ]
+        self.assertEqual(len(broken), 2)
+
+    def test_image_request_failure_is_handled_gracefully(self):
+        html = (
+            '<html><head><title>Title</title>'
+            '<meta name="description" content="Desc"></head>'
+            '<body><h1>Heading</h1><img src="/timeout.png" alt="Timeout"></body></html>'
+        )
+
+        def fake_get(url, **_):
+            if url.endswith("/robots.txt"):
+                return make_response("GET", url, 200, ROBOTS_TXT)
+            if url == START_URL:
+                return make_response("GET", url, 200, html)
+            raise httpx.ConnectError("image host unreachable")
+
+        with patch("crawler.httpx.get", side_effect=fake_get), \
+             patch("crawler.time.sleep"):
+            pages = crawler.crawl_website(START_URL, max_pages=1, max_depth=0)
+
+        self.assertEqual(len(pages), 1)
+        self.assertIsNone(pages[0]["error"])
+        self.assertEqual(pages[0]["seo_issues"], [])
+
+    def test_non_html_and_failed_pages_do_not_check_images(self):
+        image_fetches = []
+
+        def fake_get_non_html(url, **_):
+            if url.endswith("/robots.txt"):
+                return make_response("GET", url, 200, ROBOTS_TXT)
+            if url == START_URL:
+                return httpx.Response(
+                    200,
+                    text='<img src="/broken.png" alt="x">',
+                    headers={"content-type": "application/json"},
+                    request=httpx.Request("GET", url),
+                )
+            image_fetches.append(url)
+            return make_response("GET", url, 404)
+
+        with patch("crawler.httpx.get", side_effect=fake_get_non_html), \
+             patch("crawler.time.sleep"):
+            pages = crawler.crawl_website(START_URL, max_pages=1, max_depth=0)
+
+        self.assertEqual(image_fetches, [])
+        self.assertEqual(pages[0]["seo_issues"], [])
+
+
 if __name__ == "__main__":
     unittest.main()
 

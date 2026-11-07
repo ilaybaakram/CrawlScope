@@ -38,6 +38,31 @@ def classify_link(status_code: int | None, error: str | None) -> str:
     return "working"
 
 
+def check_image(
+    image_url: str,
+    headers: dict[str, str],
+) -> tuple[int | None, str | None]:
+    """Return (status_code, error) for an image URL."""
+    try:
+        response = httpx.get(
+            image_url,
+            headers=headers,
+            timeout=10.0,
+            follow_redirects=True,
+        )
+        return response.status_code, None
+    except httpx.RequestError as error:
+        return None, str(error)
+
+
+def classify_image(status_code: int | None, error: str | None) -> str:
+    if error is not None or status_code is None:
+        return "error"
+    if status_code >= 400:
+        return "broken"
+    return "working"
+
+
 def is_html_content(content_type: str | None) -> bool:
     if not content_type:
         return False
@@ -137,6 +162,64 @@ def detect_image_seo_issues(
     return image_issues
 
 
+def detect_broken_image_issues(
+    url: str,
+    soup: BeautifulSoup,
+    content_type: str | None,
+    headers: dict[str, str],
+    checked_images: dict[str, tuple[int | None, str | None]],
+    max_image_checks: int = 50,
+    delay_seconds: float = 1.0,
+) -> list[dict[str, Any]]:
+    if not is_html_content(content_type):
+        return []
+
+    broken_issues: list[dict[str, Any]] = []
+    seen_on_page: set[str] = set()
+
+    for img_tag in soup.find_all("img"):
+        raw_src = img_tag.get("src")
+        if raw_src is None or not str(raw_src).strip():
+            continue
+
+        resolved_url = urljoin(url, str(raw_src).strip())
+        clean_image_url, _ = urldefrag(resolved_url)
+        parsed_image_url = urlparse(clean_image_url)
+
+        if parsed_image_url.scheme not in ("http", "https"):
+            continue
+
+        if clean_image_url in seen_on_page:
+            continue
+        seen_on_page.add(clean_image_url)
+
+        if clean_image_url in checked_images:
+            status_code, error = checked_images[clean_image_url]
+        else:
+            if len(checked_images) >= max_image_checks:
+                continue
+            if delay_seconds > 0:
+                time.sleep(delay_seconds)
+            status_code, error = check_image(clean_image_url, headers)
+            checked_images[clean_image_url] = (status_code, error)
+
+        if classify_image(status_code, error) == "broken":
+            broken_issues.append(
+                {
+                    "type": "broken_image",
+                    "severity": "warning",
+                    "message": (
+                        f"Broken image (HTTP {status_code}): {clean_image_url}"
+                    ),
+                    "url": url,
+                    "image_url": clean_image_url,
+                    "status_code": status_code,
+                }
+            )
+
+    return broken_issues
+
+
 def normalize_metadata_value(
     value: str | None,
     is_title: bool = False,
@@ -214,6 +297,7 @@ def crawl_website(
     max_depth: int = 2,
     max_link_checks: int = 50,
     link_results: list[dict[str, Any]] | None = None,
+    max_image_checks: int = 50,
 ) -> list[dict[str, Any]]:
     clean_start_url, _ = urldefrag(start_url)
     queue = deque([(clean_start_url, 0)])
@@ -225,6 +309,7 @@ def crawl_website(
         link_results = []
     checked_links = set()
     link_requests_made = 0
+    checked_images: dict[str, tuple[int | None, str | None]] = {}
 
     parsed_start_url = urlparse(clean_start_url)
     target_hostname = parsed_start_url.hostname
@@ -311,6 +396,17 @@ def crawl_website(
                     url=current_url,
                     soup=soup,
                     content_type=content_type,
+                )
+            )
+            seo_issues.extend(
+                detect_broken_image_issues(
+                    url=current_url,
+                    soup=soup,
+                    content_type=content_type,
+                    headers=headers,
+                    checked_images=checked_images,
+                    max_image_checks=max_image_checks,
+                    delay_seconds=delay_seconds,
                 )
             )
 

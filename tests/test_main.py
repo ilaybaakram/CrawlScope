@@ -34,6 +34,14 @@ SAMPLE_PAGE = {
             "url": "https://example.com/",
             "image_url": "https://example.com/hero.png",
         },
+        {
+            "type": "broken_image",
+            "severity": "warning",
+            "message": "Broken image (HTTP 404): https://example.com/missing.png",
+            "url": "https://example.com/",
+            "image_url": "https://example.com/missing.png",
+            "status_code": 404,
+        },
     ],
     "error": None,
 }
@@ -101,11 +109,20 @@ class FastAPIEndpointTests(unittest.TestCase):
         self.assertEqual(data["pages"], [SAMPLE_PAGE])
         self.assertEqual(
             [issue["type"] for issue in data["pages"][0]["seo_issues"]],
-            ["missing_meta_description", "duplicate_title", "missing_image_alt"],
+            [
+                "missing_meta_description",
+                "duplicate_title",
+                "missing_image_alt",
+                "broken_image",
+            ],
         )
         self.assertEqual(
             data["pages"][0]["seo_issues"][2]["image_url"],
             "https://example.com/hero.png",
+        )
+        self.assertEqual(
+            data["pages"][0]["seo_issues"][3]["status_code"],
+            404,
         )
         self.assertEqual(data["links"], [SAMPLE_LINK])
 
