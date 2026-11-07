@@ -116,6 +116,59 @@ def detect_seo_issues(
     return issues
 
 
+def detect_url_seo_issues(
+    url: str,
+    max_url_length: int = 100,
+) -> list[dict[str, str]]:
+    parsed = urlparse(url)
+    path = parsed.path or ""
+
+    issues: list[dict[str, str]] = []
+    seen_types: set[str] = set()
+
+    def add_issue(issue_type: str, severity: str, message: str) -> None:
+        if issue_type not in seen_types:
+            seen_types.add(issue_type)
+            issues.append(
+                {
+                    "type": issue_type,
+                    "severity": severity,
+                    "message": message,
+                    "url": url,
+                }
+            )
+
+    if any(char.isupper() for char in path):
+        add_issue(
+            "uppercase_url",
+            "warning",
+            f"URL path contains uppercase characters: {path}",
+        )
+
+    if "_" in path:
+        add_issue(
+            "underscore_url",
+            "warning",
+            f"URL path contains underscores instead of hyphens: {path}",
+        )
+
+    if len(url) > max_url_length:
+        add_issue(
+            "long_url",
+            "warning",
+            f"URL length ({len(url)} characters) exceeds the {max_url_length}-character threshold.",
+        )
+
+    if parsed.query:
+        add_issue(
+            "query_parameter_url",
+            "info",
+            f"URL contains query parameters (?{parsed.query}).",
+        )
+
+    return issues
+
+
 def detect_image_seo_issues(
     url: str,
     soup: BeautifulSoup,
@@ -298,6 +351,7 @@ def crawl_website(
     max_link_checks: int = 50,
     link_results: list[dict[str, Any]] | None = None,
     max_image_checks: int = 50,
+    max_url_length: int = 100,
 ) -> list[dict[str, Any]]:
     clean_start_url, _ = urldefrag(start_url)
     queue = deque([(clean_start_url, 0)])
@@ -390,6 +444,12 @@ def crawl_website(
                 meta_description=meta_description,
                 h1_heading=h1_heading,
                 content_type=content_type,
+            )
+            seo_issues.extend(
+                detect_url_seo_issues(
+                    url=current_url,
+                    max_url_length=max_url_length,
+                )
             )
             seo_issues.extend(
                 detect_image_seo_issues(

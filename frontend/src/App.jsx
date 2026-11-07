@@ -476,7 +476,13 @@ function App() {
                       <code>{issue.type}</code>
                     </td>
                     <td>
-                      <span className="status-pill status-warning">
+                      <span
+                        className={
+                          issue.severity === "info"
+                            ? "status-pill status-info"
+                            : "status-pill status-warning"
+                        }
+                      >
                         {issue.severity}
                       </span>
                     </td>

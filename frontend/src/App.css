@@ -298,6 +298,11 @@ th {
   color: #92400e;
 }
 
+.status-info {
+  background-color: #e0f2fe;
+  color: #075985;
+}
+
 .seo-metrics {
   display: flex;
   flex-wrap: wrap;

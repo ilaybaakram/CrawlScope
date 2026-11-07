@@ -669,6 +669,88 @@ class BrokenImageDetectionTests(unittest.TestCase):
         self.assertEqual(pages[0]["seo_issues"], [])
 
 
+class UrlSeoAuditTests(unittest.TestCase):
+    COMPLETE_HTML = (
+        '<html><head><title>Valid Title</title>'
+        '<meta name="description" content="Valid description"></head>'
+        "<body><h1>Valid H1</h1></body></html>"
+    )
+
+    def crawl_url(self, target_url: str, **kwargs):
+        def fake_get(url, **_):
+            if url.endswith("/robots.txt"):
+                return make_response("GET", url, 200, ROBOTS_TXT)
+            return make_response("GET", url, 200, self.COMPLETE_HTML)
+
+        with patch("crawler.httpx.get", side_effect=fake_get), \
+             patch("crawler.time.sleep"):
+            pages = crawler.crawl_website(
+                target_url,
+                max_pages=1,
+                max_depth=0,
+                **kwargs,
+            )
+        return pages[0]
+
+    def test_uppercase_url_path_is_detected(self):
+        url = "https://example.com/Products/Shoes"
+        page = self.crawl_url(url)
+        self.assertEqual(len(page["seo_issues"]), 1)
+        issue = page["seo_issues"][0]
+        self.assertEqual(issue["type"], "uppercase_url")
+        self.assertEqual(issue["severity"], "warning")
+        self.assertEqual(issue["url"], url)
+
+    def test_underscore_in_url_path_is_detected(self):
+        url = "https://example.com/product_guide/seo_tips"
+        page = self.crawl_url(url)
+        self.assertEqual(len(page["seo_issues"]), 1)
+        issue = page["seo_issues"][0]
+        self.assertEqual(issue["type"], "underscore_url")
+        self.assertEqual(issue["severity"], "warning")
+        self.assertEqual(issue["url"], url)
+
+    def test_long_url_exceeding_default_threshold_is_detected(self):
+        url = "https://example.com/" + ("a" * 85)
+        self.assertGreater(len(url), 100)
+        page = self.crawl_url(url)
+        self.assertEqual(len(page["seo_issues"]), 1)
+        issue = page["seo_issues"][0]
+        self.assertEqual(issue["type"], "long_url")
+        self.assertEqual(issue["severity"], "warning")
+        self.assertEqual(issue["url"], url)
+
+    def test_configurable_long_url_threshold(self):
+        url = "https://example.com/short-path"
+        page_flagged = self.crawl_url(url, max_url_length=20)
+        self.assertEqual(
+            [issue["type"] for issue in page_flagged["seo_issues"]],
+            ["long_url"],
+        )
+
+        page_ok = self.crawl_url(url, max_url_length=50)
+        self.assertEqual(page_ok["seo_issues"], [])
+
+    def test_query_parameters_in_url_are_detected_as_info(self):
+        url = "https://example.com/search?page=2&sort=asc"
+        page = self.crawl_url(url)
+        self.assertEqual(len(page["seo_issues"]), 1)
+        issue = page["seo_issues"][0]
+        self.assertEqual(issue["type"], "query_parameter_url")
+        self.assertEqual(issue["severity"], "info")
+        self.assertEqual(issue["url"], url)
+
+    def test_uppercase_hostname_only_does_not_trigger_uppercase_path_issue(self):
+        url = "https://EXAMPLE.COM/clean-path"
+        page = self.crawl_url(url)
+        self.assertEqual(page["seo_issues"], [])
+
+    def test_clean_url_produces_no_url_issues(self):
+        url = "https://example.com/blog/seo-best-practices"
+        page = self.crawl_url(url)
+        self.assertEqual(page["seo_issues"], [])
+
+
 if __name__ == "__main__":
     unittest.main()
 

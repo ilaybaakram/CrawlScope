@@ -42,6 +42,12 @@ SAMPLE_PAGE = {
             "image_url": "https://example.com/missing.png",
             "status_code": 404,
         },
+        {
+            "type": "underscore_url",
+            "severity": "warning",
+            "message": "URL path contains underscores instead of hyphens: /seo_guide",
+            "url": "https://example.com/seo_guide",
+        },
     ],
     "error": None,
 }
@@ -114,6 +120,7 @@ class FastAPIEndpointTests(unittest.TestCase):
                 "duplicate_title",
                 "missing_image_alt",
                 "broken_image",
+                "underscore_url",
             ],
         )
         self.assertEqual(
