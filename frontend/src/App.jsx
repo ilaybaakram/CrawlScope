@@ -4,6 +4,73 @@ import "./App.css";
 const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
 
+const PAGE_FIELDS = [
+  "url",
+  "depth",
+  "status_code",
+  "title",
+  "meta_description",
+  "h1",
+  "total_links",
+  "content_type",
+  "error",
+];
+
+const LINK_FIELDS = ["url", "found_on", "status_code", "result", "error"];
+
+function escapeCsvCell(value) {
+  if (value === null || value === undefined) {
+    return "";
+  }
+  const text = String(value);
+  if (
+    text.includes(",") ||
+    text.includes('"') ||
+    text.includes("\n") ||
+    text.includes("\r")
+  ) {
+    return `"${text.replace(/"/g, '""')}"`;
+  }
+  return text;
+}
+
+function buildCsvContent(rows, defaultFields) {
+  const safeRows = Array.isArray(rows) ? rows : [];
+  const fieldnames = [...defaultFields];
+
+  for (const row of safeRows) {
+    for (const key of Object.keys(row)) {
+      if (!fieldnames.includes(key)) {
+        fieldnames.push(key);
+      }
+    }
+  }
+
+  const headerLine = fieldnames.map(escapeCsvCell).join(",");
+  const dataLines = safeRows.map((row) =>
+    fieldnames.map((field) => escapeCsvCell(row[field])).join(",")
+  );
+
+  return [headerLine, ...dataLines].join("\n") + "\n";
+}
+
+function buildJsonContent(rows) {
+  const safeRows = Array.isArray(rows) ? rows : [];
+  return JSON.stringify(safeRows, null, 2) + "\n";
+}
+
+function triggerBrowserDownload(content, filename, mimeType) {
+  const blob = new Blob([content], { type: mimeType });
+  const objectUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = objectUrl;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  document.body.removeChild(anchor);
+  URL.revokeObjectURL(objectUrl);
+}
+
 function formatErrorMessage(detail) {
   if (typeof detail === "string") {
     return detail;
@@ -30,6 +97,7 @@ function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
   const [crawlData, setCrawlData] = useState(null);
+  const [crawlHistory, setCrawlHistory] = useState([]);
 
   async function handleStartCrawl(event) {
     event.preventDefault();
@@ -60,6 +128,25 @@ function App() {
       }
 
       setCrawlData(payload);
+
+      const payloadLinks = Array.isArray(payload?.links) ? payload.links : [];
+      const brokenCount = payloadLinks.filter(
+        (link) => link.result === "broken" || link.result === "error"
+      ).length;
+
+      const historySummary = {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        start_url: payload.start_url || startUrl,
+        timestamp: new Date().toLocaleString(),
+        pages_crawled: payload.pages_crawled ?? 0,
+        links_checked: payload.links_checked ?? 0,
+        broken_links: brokenCount,
+      };
+
+      setCrawlHistory((previousHistory) => [
+        historySummary,
+        ...previousHistory,
+      ]);
     } catch (error) {
       setErrorMessage(
         error.message || "Could not connect to the CrawlScope backend API."
@@ -74,6 +161,39 @@ function App() {
   const brokenLinks = links.filter(
     (link) => link.result === "broken" || link.result === "error"
   );
+  const canDownload = Boolean(crawlData) && !isLoading;
+
+  function handleDownloadPagesCsv() {
+    if (!crawlData) return;
+    const content = buildCsvContent(pages, PAGE_FIELDS);
+    triggerBrowserDownload(content, "crawl_results.csv", "text/csv;charset=utf-8");
+  }
+
+  function handleDownloadPagesJson() {
+    if (!crawlData) return;
+    const content = buildJsonContent(pages);
+    triggerBrowserDownload(
+      content,
+      "crawl_results.json",
+      "application/json;charset=utf-8"
+    );
+  }
+
+  function handleDownloadLinksCsv() {
+    if (!crawlData) return;
+    const content = buildCsvContent(links, LINK_FIELDS);
+    triggerBrowserDownload(content, "link_results.csv", "text/csv;charset=utf-8");
+  }
+
+  function handleDownloadLinksJson() {
+    if (!crawlData) return;
+    const content = buildJsonContent(links);
+    triggerBrowserDownload(
+      content,
+      "link_results.json",
+      "application/json;charset=utf-8"
+    );
+  }
 
   return (
     <div className="dashboard-container">
@@ -193,6 +313,51 @@ function App() {
       </section>
 
       <section className="card">
+        <div className="section-header">
+          <h2>Download Crawl Results</h2>
+          {!crawlData && (
+            <span className="section-hint">
+              Run a crawl first to enable result downloads
+            </span>
+          )}
+        </div>
+        <div className="download-grid">
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={handleDownloadPagesCsv}
+            disabled={!canDownload}
+          >
+            Download Pages CSV
+          </button>
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={handleDownloadPagesJson}
+            disabled={!canDownload}
+          >
+            Download Pages JSON
+          </button>
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={handleDownloadLinksCsv}
+            disabled={!canDownload}
+          >
+            Download Links CSV
+          </button>
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={handleDownloadLinksJson}
+            disabled={!canDownload}
+          >
+            Download Links JSON
+          </button>
+        </div>
+      </section>
+
+      <section className="card">
         <h2>Crawled Pages ({pages.length})</h2>
         {pages.length === 0 ? (
           <p className="empty-state">
@@ -243,7 +408,9 @@ function App() {
                     <td>{page.h1 || "—"}</td>
                     <td>{page.meta_description || "—"}</td>
                     <td>{page.total_links ?? 0}</td>
-                    <td>{page.content_type || (page.error ? page.error : "—")}</td>
+                    <td>
+                      {page.content_type || (page.error ? page.error : "—")}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -299,9 +466,72 @@ function App() {
           </div>
         )}
       </section>
+
+      <section className="card">
+        <div className="section-header">
+          <h2>Session Crawl History ({crawlHistory.length})</h2>
+          {crawlHistory.length > 0 && (
+            <button
+              type="button"
+              className="clear-button"
+              onClick={() => setCrawlHistory([])}
+            >
+              Clear History
+            </button>
+          )}
+        </div>
+        {crawlHistory.length === 0 ? (
+          <p className="empty-state">
+            No crawls recorded in this browser session yet. Completed crawls
+            will appear here with newest first.
+          </p>
+        ) : (
+          <div className="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Website URL</th>
+                  <th>Date / Time</th>
+                  <th>Pages Crawled</th>
+                  <th>Links Checked</th>
+                  <th>Broken Links</th>
+                </tr>
+              </thead>
+              <tbody>
+                {crawlHistory.map((entry) => (
+                  <tr key={entry.id}>
+                    <td className="url-cell">
+                      <a
+                        href={entry.start_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        {entry.start_url}
+                      </a>
+                    </td>
+                    <td>{entry.timestamp}</td>
+                    <td>{entry.pages_crawled}</td>
+                    <td>{entry.links_checked}</td>
+                    <td>
+                      <span
+                        className={
+                          entry.broken_links > 0
+                            ? "status-pill status-bad"
+                            : "status-pill status-ok"
+                        }
+                      >
+                        {entry.broken_links}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
     </div>
   );
 }
 
 export default App;
-
