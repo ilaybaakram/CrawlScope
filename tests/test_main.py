@@ -120,6 +120,21 @@ class FastAPIEndpointTests(unittest.TestCase):
                 )
                 self.assertEqual(response.status_code, 422)
 
+    def test_cors_allows_local_vite_origin(self) -> None:
+        response = self.client.options(
+            "/crawl",
+            headers={
+                "Origin": "http://localhost:5173",
+                "Access-Control-Request-Method": "POST",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.headers.get("access-control-allow-origin"),
+            "http://localhost:5173",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
+
