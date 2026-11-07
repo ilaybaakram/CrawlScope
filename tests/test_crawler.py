@@ -145,5 +145,80 @@ class CrawlLinkCheckTests(unittest.TestCase):
         self.assertLessEqual(len(requested), 2)
 
 
+class SeoAuditTests(unittest.TestCase):
+    def crawl_single_page(self, html: str, content_type: str = "text/html; charset=utf-8"):
+        def fake_get(url, **_):
+            if url.endswith("/robots.txt"):
+                return make_response("GET", url, 200, ROBOTS_TXT)
+            return httpx.Response(
+                200,
+                text=html,
+                headers={"content-type": content_type},
+                request=httpx.Request("GET", url),
+            )
+
+        with patch("crawler.httpx.get", side_effect=fake_get), \
+             patch("crawler.time.sleep"):
+            pages = crawler.crawl_website(START_URL, max_pages=1, max_depth=0)
+        return pages[0]
+
+    def test_missing_title_is_detected(self):
+        page = self.crawl_single_page(
+            '<html><head><meta name="description" content="Desc"></head>'
+            "<body><h1>Heading</h1></body></html>"
+        )
+        issue_types = [issue["type"] for issue in page["seo_issues"]]
+        self.assertEqual(issue_types, ["missing_title"])
+        self.assertEqual(page["seo_issues"][0]["severity"], "warning")
+        self.assertEqual(page["seo_issues"][0]["url"], START_URL)
+
+    def test_missing_meta_description_is_detected(self):
+        page = self.crawl_single_page(
+            "<html><head><title>Valid Title</title></head>"
+            "<body><h1>Heading</h1></body></html>"
+        )
+        issue_types = [issue["type"] for issue in page["seo_issues"]]
+        self.assertEqual(issue_types, ["missing_meta_description"])
+
+    def test_missing_h1_is_detected(self):
+        page = self.crawl_single_page(
+            '<html><head><title>Valid Title</title>'
+            '<meta name="description" content="Desc"></head>'
+            "<body><p>No H1 here</p></body></html>"
+        )
+        issue_types = [issue["type"] for issue in page["seo_issues"]]
+        self.assertEqual(issue_types, ["missing_h1"])
+
+    def test_whitespace_only_metadata_is_treated_as_missing(self):
+        page = self.crawl_single_page(
+            '<html><head><title>   \n\t  </title>'
+            '<meta name="description" content="   "></head>'
+            "<body><h1>   </h1></body></html>"
+        )
+        issue_types = [issue["type"] for issue in page["seo_issues"]]
+        self.assertEqual(
+            issue_types,
+            ["missing_title", "missing_meta_description", "missing_h1"],
+        )
+        self.assertIsNone(page["meta_description"])
+        self.assertIsNone(page["h1"])
+
+    def test_html_page_with_complete_metadata_has_no_seo_issues(self):
+        page = self.crawl_single_page(
+            '<html><head><title>Complete Page</title>'
+            '<meta name="description" content="A helpful description."></head>'
+            "<body><h1>Main Heading</h1></body></html>"
+        )
+        self.assertEqual(page["seo_issues"], [])
+
+    def test_non_html_page_is_not_flagged_for_seo_issues(self):
+        page = self.crawl_single_page(
+            '{"status": "ok"}',
+            content_type="application/json",
+        )
+        self.assertEqual(page["seo_issues"], [])
+
+
 if __name__ == "__main__":
     unittest.main()
+

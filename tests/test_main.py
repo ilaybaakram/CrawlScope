@@ -10,10 +10,18 @@ SAMPLE_PAGE = {
     "depth": 0,
     "status_code": 200,
     "title": "Example Domain",
-    "meta_description": "Example description",
+    "meta_description": None,
     "h1": "Example Domain",
     "total_links": 1,
     "content_type": "text/html",
+    "seo_issues": [
+        {
+            "type": "missing_meta_description",
+            "severity": "warning",
+            "message": "Page is missing a <meta name=\"description\"> tag or its content is empty.",
+            "url": "https://example.com/",
+        }
+    ],
     "error": None,
 }
 
@@ -78,6 +86,10 @@ class FastAPIEndpointTests(unittest.TestCase):
         self.assertEqual(data["pages_crawled"], 1)
         self.assertEqual(data["links_checked"], 1)
         self.assertEqual(data["pages"], [SAMPLE_PAGE])
+        self.assertEqual(
+            data["pages"][0]["seo_issues"][0]["type"],
+            "missing_meta_description",
+        )
         self.assertEqual(data["links"], [SAMPLE_LINK])
 
         mock_crawl.assert_called_once()

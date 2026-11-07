@@ -293,3 +293,22 @@ th {
   color: #991b1b;
 }
 
+.status-warning {
+  background-color: #fef3c7;
+  color: #92400e;
+}
+
+.seo-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.metric-badge {
+  background-color: #f1f5f9;
+  color: #334155;
+  padding: 0.3rem 0.65rem;
+  border-radius: 6px;
+  font-size: 0.85rem;
+}
+

@@ -16,6 +16,7 @@ SAMPLE_PAGES = [
         "h1": "Welcome",
         "total_links": 12,
         "content_type": "text/html; charset=utf-8",
+        "seo_issues": [],
         "error": None,
     },
     {
@@ -27,6 +28,7 @@ SAMPLE_PAGES = [
         "h1": None,
         "total_links": 0,
         "content_type": "text/html",
+        "seo_issues": [],
         "error": "Client error '404 Not Found'",
     },
     {
@@ -38,6 +40,20 @@ SAMPLE_PAGES = [
         "h1": None,
         "total_links": 3,
         "content_type": "text/html",
+        "seo_issues": [
+            {
+                "type": "missing_meta_description",
+                "severity": "warning",
+                "message": "Page is missing a <meta name=\"description\"> tag or its content is empty.",
+                "url": "https://example.com/café",
+            },
+            {
+                "type": "missing_h1",
+                "severity": "warning",
+                "message": "Page is missing an <h1> heading or the heading is empty.",
+                "url": "https://example.com/café",
+            },
+        ],
         "error": None,
     },
 ]
@@ -152,6 +168,20 @@ class PageExportTests(ExporterTestCase):
 
         self.assertEqual(read_json(path), [])
 
+    def test_seo_issues_appear_in_csv_and_json_exports(self):
+        csv_path = exporter.export_pages_to_csv(SAMPLE_PAGES, self.folder / "pages.csv")
+        json_path = exporter.export_pages_to_json(SAMPLE_PAGES, self.folder / "pages.json")
+
+        rows = read_csv_rows(csv_path)
+        self.assertIn("seo_issues", rows[0])
+        self.assertEqual(json.loads(rows[0]["seo_issues"]), [])
+        parsed_issues = json.loads(rows[2]["seo_issues"])
+        self.assertEqual(len(parsed_issues), 2)
+        self.assertEqual(parsed_issues[0]["type"], "missing_meta_description")
+
+        json_data = read_json(json_path)
+        self.assertEqual(json_data[2]["seo_issues"], SAMPLE_PAGES[2]["seo_issues"])
+
 
 class LinkExportTests(ExporterTestCase):
     def test_csv_contains_all_fields_and_rows(self):
@@ -219,3 +249,4 @@ class CrawlerFieldCompatibilityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

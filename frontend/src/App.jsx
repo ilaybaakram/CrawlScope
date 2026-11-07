@@ -13,6 +13,7 @@ const PAGE_FIELDS = [
   "h1",
   "total_links",
   "content_type",
+  "seo_issues",
   "error",
 ];
 
@@ -22,7 +23,8 @@ function escapeCsvCell(value) {
   if (value === null || value === undefined) {
     return "";
   }
-  const text = String(value);
+  const text =
+    typeof value === "object" ? JSON.stringify(value) : String(value);
   if (
     text.includes(",") ||
     text.includes('"') ||
@@ -160,6 +162,12 @@ function App() {
   const links = crawlData?.links || [];
   const brokenLinks = links.filter(
     (link) => link.result === "broken" || link.result === "error"
+  );
+  const pagesWithSeoIssues = pages.filter(
+    (page) => Array.isArray(page.seo_issues) && page.seo_issues.length > 0
+  );
+  const seoIssues = pages.flatMap((page) =>
+    Array.isArray(page.seo_issues) ? page.seo_issues : []
   );
   const canDownload = Boolean(crawlData) && !isLoading;
 
@@ -411,6 +419,64 @@ function App() {
                     <td>
                       {page.content_type || (page.error ? page.error : "—")}
                     </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      <section className="card">
+        <div className="section-header">
+          <h2>SEO Audit ({seoIssues.length})</h2>
+          <div className="seo-metrics">
+            <span className="metric-badge">
+              Total SEO Issues: <strong>{seoIssues.length}</strong>
+            </span>
+            <span className="metric-badge">
+              Pages with Issues: <strong>{pagesWithSeoIssues.length}</strong>
+            </span>
+          </div>
+        </div>
+        {seoIssues.length === 0 ? (
+          <p className="empty-state">
+            {crawlData
+              ? "No missing SEO metadata issues detected in this crawl."
+              : "Missing title, meta description, and H1 issues will appear here after a crawl."}
+          </p>
+        ) : (
+          <div className="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Page URL</th>
+                  <th>Issue Type</th>
+                  <th>Severity</th>
+                  <th>Message</th>
+                </tr>
+              </thead>
+              <tbody>
+                {seoIssues.map((issue) => (
+                  <tr key={`${issue.url}-${issue.type}`}>
+                    <td className="url-cell">
+                      <a
+                        href={issue.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        {issue.url}
+                      </a>
+                    </td>
+                    <td>
+                      <code>{issue.type}</code>
+                    </td>
+                    <td>
+                      <span className="status-pill status-warning">
+                        {issue.severity}
+                      </span>
+                    </td>
+                    <td>{issue.message}</td>
                   </tr>
                 ))}
               </tbody>

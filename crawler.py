@@ -38,6 +38,59 @@ def classify_link(status_code: int | None, error: str | None) -> str:
     return "working"
 
 
+def is_html_content(content_type: str | None) -> bool:
+    if not content_type:
+        return False
+    lowered = content_type.lower()
+    return "text/html" in lowered or "application/xhtml+xml" in lowered
+
+
+def detect_seo_issues(
+    url: str,
+    title: str | None,
+    meta_description: str | None,
+    h1_heading: str | None,
+    content_type: str | None,
+) -> list[dict[str, str]]:
+    if not is_html_content(content_type):
+        return []
+
+    issues: list[dict[str, str]] = []
+    seen_types: set[str] = set()
+
+    def add_issue(issue_type: str, message: str) -> None:
+        if issue_type not in seen_types:
+            seen_types.add(issue_type)
+            issues.append(
+                {
+                    "type": issue_type,
+                    "severity": "warning",
+                    "message": message,
+                    "url": url,
+                }
+            )
+
+    if not title or not title.strip() or title.strip() == "No title found":
+        add_issue(
+            "missing_title",
+            "Page is missing a <title> tag or the title is empty.",
+        )
+
+    if not meta_description or not meta_description.strip():
+        add_issue(
+            "missing_meta_description",
+            "Page is missing a <meta name=\"description\"> tag or its content is empty.",
+        )
+
+    if not h1_heading or not h1_heading.strip():
+        add_issue(
+            "missing_h1",
+            "Page is missing an <h1> heading or the heading is empty.",
+        )
+
+    return issues
+
+
 def crawl_website(
     start_url: str,
     max_pages: int = 10,
@@ -108,15 +161,20 @@ def crawl_website(
 
             soup = BeautifulSoup(response.text, "html.parser")
 
-            if soup.title and soup.title.string:
-                page_title = soup.title.string.strip()
+            raw_title = (
+                soup.title.string.strip()
+                if (soup.title and soup.title.string)
+                else ""
+            )
+            if raw_title:
+                page_title = raw_title
             else:
                 page_title = "No title found"
 
             meta_tag = soup.find("meta", attrs={"name": "description"})
             meta_description = None
             if meta_tag and meta_tag.get("content"):
-                meta_description = meta_tag.get("content").strip()
+                meta_description = meta_tag.get("content").strip() or None
 
             h1_tag = soup.find("h1")
             h1_heading = None
@@ -125,6 +183,13 @@ def crawl_website(
 
             total_links = len(soup.find_all("a"))
             content_type = response.headers.get("content-type")
+            seo_issues = detect_seo_issues(
+                url=current_url,
+                title=page_title,
+                meta_description=meta_description,
+                h1_heading=h1_heading,
+                content_type=content_type,
+            )
 
             results.append(
                 {
@@ -136,6 +201,7 @@ def crawl_website(
                     "h1": h1_heading,
                     "total_links": total_links,
                     "content_type": content_type,
+                    "seo_issues": seo_issues,
                     "error": None,
                 }
             )
@@ -235,6 +301,7 @@ def crawl_website(
                     "h1": None,
                     "total_links": 0,
                     "content_type": None,
+                    "seo_issues": [],
                     "error": str(error),
                 }
             )
@@ -254,6 +321,7 @@ def crawl_website(
                     "h1": None,
                     "total_links": 0,
                     "content_type": error.response.headers.get("content-type"),
+                    "seo_issues": [],
                     "error": str(error),
                 }
             )

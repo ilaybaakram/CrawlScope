@@ -13,6 +13,7 @@ PAGE_FIELDS = [
     "h1",
     "total_links",
     "content_type",
+    "seo_issues",
     "error",
 ]
 
@@ -54,7 +55,16 @@ def _write_csv(
     with path.open("w", encoding="utf-8", newline="") as csv_file:
         writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerows(rows)
+        for row in rows:
+            serialized_row = {
+                key: (
+                    json.dumps(value, ensure_ascii=False)
+                    if isinstance(value, (list, dict))
+                    else value
+                )
+                for key, value in row.items()
+            }
+            writer.writerow(serialized_row)
 
     return path
 
@@ -87,3 +97,4 @@ def export_links_to_csv(link_results: list[dict[str, Any]], file_path: str | Pat
 def export_links_to_json(link_results: list[dict[str, Any]], file_path: str | Path) -> Path:
     """Write link check results to a JSON file. Empty results write an empty list."""
     return _write_json(link_results, file_path)
+

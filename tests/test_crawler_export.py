@@ -23,6 +23,7 @@ PAGE = {
     "h1": "Welcome",
     "total_links": 2,
     "content_type": "text/html",
+    "seo_issues": [],
     "error": None,
 }
 
@@ -143,3 +144,4 @@ class RunCrawlAndExportTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
