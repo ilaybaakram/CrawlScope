@@ -91,6 +91,52 @@ def detect_seo_issues(
     return issues
 
 
+def detect_image_seo_issues(
+    url: str,
+    soup: BeautifulSoup,
+    content_type: str | None,
+) -> list[dict[str, str]]:
+    if not is_html_content(content_type):
+        return []
+
+    image_issues: list[dict[str, str]] = []
+    seen_image_issues: set[tuple[str, str]] = set()
+
+    for img_tag in soup.find_all("img"):
+        raw_src = img_tag.get("src")
+        if raw_src is None or not str(raw_src).strip():
+            continue
+
+        resolved_image_url = urljoin(url, str(raw_src).strip())
+        alt_value = img_tag.get("alt")
+
+        if alt_value is None:
+            issue_type = "missing_image_alt"
+            message = f"Image is missing an alt attribute: {resolved_image_url}"
+        elif not str(alt_value).strip():
+            issue_type = "empty_image_alt"
+            message = f"Image has an empty alt attribute: {resolved_image_url}"
+        else:
+            continue
+
+        dedup_key = (issue_type, resolved_image_url)
+        if dedup_key in seen_image_issues:
+            continue
+        seen_image_issues.add(dedup_key)
+
+        image_issues.append(
+            {
+                "type": issue_type,
+                "severity": "warning",
+                "message": message,
+                "url": url,
+                "image_url": resolved_image_url,
+            }
+        )
+
+    return image_issues
+
+
 def normalize_metadata_value(
     value: str | None,
     is_title: bool = False,
@@ -259,6 +305,13 @@ def crawl_website(
                 meta_description=meta_description,
                 h1_heading=h1_heading,
                 content_type=content_type,
+            )
+            seo_issues.extend(
+                detect_image_seo_issues(
+                    url=current_url,
+                    soup=soup,
+                    content_type=content_type,
+                )
             )
 
             results.append(

@@ -372,6 +372,125 @@ class DuplicateSeoAuditTests(unittest.TestCase):
         self.assertEqual(failed_pages[1]["seo_issues"], [])
 
 
+class ImageSeoAuditTests(unittest.TestCase):
+    def crawl_page(
+        self,
+        html: str,
+        content_type: str = "text/html; charset=utf-8",
+        status_code: int = 200,
+    ):
+        def fake_get(url, **_):
+            if url.endswith("/robots.txt"):
+                return make_response("GET", url, 200, ROBOTS_TXT)
+            return httpx.Response(
+                status_code,
+                text=html,
+                headers={"content-type": content_type},
+                request=httpx.Request("GET", url),
+            )
+
+        with patch("crawler.httpx.get", side_effect=fake_get), \
+             patch("crawler.time.sleep"):
+            pages = crawler.crawl_website(START_URL, max_pages=1, max_depth=0)
+        return pages[0]
+
+    def test_image_without_alt_attribute_is_detected(self):
+        page = self.crawl_page(
+            '<html><head><title>Title</title>'
+            '<meta name="description" content="Desc"></head>'
+            '<body><h1>Heading</h1><img src="https://example.com/photo.jpg"></body></html>'
+        )
+        self.assertEqual(len(page["seo_issues"]), 1)
+        issue = page["seo_issues"][0]
+        self.assertEqual(issue["type"], "missing_image_alt")
+        self.assertEqual(issue["severity"], "warning")
+        self.assertEqual(issue["url"], START_URL)
+        self.assertEqual(issue["image_url"], "https://example.com/photo.jpg")
+
+    def test_image_with_empty_alt_attribute_is_detected(self):
+        page = self.crawl_page(
+            '<html><head><title>Title</title>'
+            '<meta name="description" content="Desc"></head>'
+            '<body><h1>Heading</h1><img src="https://example.com/photo.jpg" alt=""></body></html>'
+        )
+        self.assertEqual(len(page["seo_issues"]), 1)
+        issue = page["seo_issues"][0]
+        self.assertEqual(issue["type"], "empty_image_alt")
+        self.assertEqual(issue["severity"], "warning")
+        self.assertEqual(issue["url"], START_URL)
+        self.assertEqual(issue["image_url"], "https://example.com/photo.jpg")
+
+    def test_image_with_whitespace_only_alt_is_detected_as_empty(self):
+        page = self.crawl_page(
+            '<html><head><title>Title</title>'
+            '<meta name="description" content="Desc"></head>'
+            '<body><h1>Heading</h1><img src="https://example.com/photo.jpg" alt="   \n\t "></body></html>'
+        )
+        self.assertEqual(len(page["seo_issues"]), 1)
+        self.assertEqual(page["seo_issues"][0]["type"], "empty_image_alt")
+
+    def test_image_with_meaningful_alt_text_produces_no_issue(self):
+        page = self.crawl_page(
+            '<html><head><title>Title</title>'
+            '<meta name="description" content="Desc"></head>'
+            '<body><h1>Heading</h1>'
+            '<img src="https://example.com/photo.jpg" alt="Company team photo">'
+            "</body></html>"
+        )
+        self.assertEqual(page["seo_issues"], [])
+
+    def test_relative_and_protocol_relative_image_urls_are_resolved(self):
+        page = self.crawl_page(
+            '<html><head><title>Title</title>'
+            '<meta name="description" content="Desc"></head>'
+            '<body><h1>Heading</h1>'
+            '<img src="/assets/logo.png">'
+            '<img src="//cdn.example.com/banner.webp" alt="">'
+            "</body></html>"
+        )
+        self.assertEqual(len(page["seo_issues"]), 2)
+        self.assertEqual(page["seo_issues"][0]["type"], "missing_image_alt")
+        self.assertEqual(
+            page["seo_issues"][0]["image_url"],
+            "https://example.com/assets/logo.png",
+        )
+        self.assertEqual(page["seo_issues"][1]["type"], "empty_image_alt")
+        self.assertEqual(
+            page["seo_issues"][1]["image_url"],
+            "https://cdn.example.com/banner.webp",
+        )
+
+    def test_image_without_src_is_skipped_and_duplicates_deduplicated(self):
+        page = self.crawl_page(
+            '<html><head><title>Title</title>'
+            '<meta name="description" content="Desc"></head>'
+            '<body><h1>Heading</h1>'
+            "<img>"
+            '<img src="   ">'
+            '<img src="/dup.png">'
+            '<img src="/dup.png">'
+            "</body></html>"
+        )
+        self.assertEqual(len(page["seo_issues"]), 1)
+        self.assertEqual(
+            page["seo_issues"][0]["image_url"],
+            "https://example.com/dup.png",
+        )
+
+    def test_non_html_and_failed_pages_are_excluded_from_image_audit(self):
+        non_html_page = self.crawl_page(
+            '<img src="/logo.png">',
+            content_type="application/json",
+        )
+        self.assertEqual(non_html_page["seo_issues"], [])
+
+        failed_page = self.crawl_page(
+            '<html><body><img src="/logo.png"></body></html>',
+            status_code=500,
+        )
+        self.assertEqual(failed_page["seo_issues"], [])
+
+
 if __name__ == "__main__":
     unittest.main()
 

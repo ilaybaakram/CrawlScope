@@ -27,6 +27,13 @@ SAMPLE_PAGE = {
             "message": "Page title 'Example Domain' is duplicated across pages: https://example.com/, https://example.com/about",
             "url": "https://example.com/",
         },
+        {
+            "type": "missing_image_alt",
+            "severity": "warning",
+            "message": "Image is missing an alt attribute: https://example.com/hero.png",
+            "url": "https://example.com/",
+            "image_url": "https://example.com/hero.png",
+        },
     ],
     "error": None,
 }
@@ -94,7 +101,11 @@ class FastAPIEndpointTests(unittest.TestCase):
         self.assertEqual(data["pages"], [SAMPLE_PAGE])
         self.assertEqual(
             [issue["type"] for issue in data["pages"][0]["seo_issues"]],
-            ["missing_meta_description", "duplicate_title"],
+            ["missing_meta_description", "duplicate_title", "missing_image_alt"],
+        )
+        self.assertEqual(
+            data["pages"][0]["seo_issues"][2]["image_url"],
+            "https://example.com/hero.png",
         )
         self.assertEqual(data["links"], [SAMPLE_LINK])
 

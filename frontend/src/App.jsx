@@ -442,8 +442,8 @@ function App() {
         {seoIssues.length === 0 ? (
           <p className="empty-state">
             {crawlData
-              ? "No missing or duplicate SEO metadata issues detected in this crawl."
-              : "Missing or duplicate title, meta description, and H1 issues will appear here after a crawl."}
+              ? "No SEO metadata or image alt text issues detected in this crawl."
+              : "Missing or duplicate metadata and image alt text issues will appear here after a crawl."}
           </p>
         ) : (
           <div className="table-wrapper">
@@ -453,12 +453,15 @@ function App() {
                   <th>Page URL</th>
                   <th>Issue Type</th>
                   <th>Severity</th>
+                  <th>Image URL</th>
                   <th>Message</th>
                 </tr>
               </thead>
               <tbody>
                 {seoIssues.map((issue) => (
-                  <tr key={`${issue.url}-${issue.type}`}>
+                  <tr
+                    key={`${issue.url}-${issue.type}-${issue.image_url || ""}`}
+                  >
                     <td className="url-cell">
                       <a
                         href={issue.url}
@@ -475,6 +478,19 @@ function App() {
                       <span className="status-pill status-warning">
                         {issue.severity}
                       </span>
+                    </td>
+                    <td className="url-cell">
+                      {issue.image_url ? (
+                        <a
+                          href={issue.image_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          {issue.image_url}
+                        </a>
+                      ) : (
+                        "—"
+                      )}
                     </td>
                     <td>{issue.message}</td>
                   </tr>
