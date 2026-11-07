@@ -1,11 +1,19 @@
 import time
 from collections import deque
+from pathlib import Path
 from typing import Any
 from urllib.parse import urldefrag, urljoin, urlparse
 from urllib.robotparser import RobotFileParser
 
 import httpx
 from bs4 import BeautifulSoup
+
+from exporter import (
+    export_links_to_csv,
+    export_links_to_json,
+    export_pages_to_csv,
+    export_pages_to_json,
+)
 
 
 def check_link(url: str, headers: dict[str, str]) -> tuple[int | None, str | None]:
@@ -268,6 +276,32 @@ def crawl_website(
     return results
 
 
+def run_crawl_and_export(
+    start_url: str,
+    output_dir: str | Path = "output",
+    **crawl_options: Any,
+) -> dict[str, Path]:
+    """Crawl a website, then save page and link results to CSV and JSON files."""
+    link_results: list[dict[str, Any]] = []
+    page_results = crawl_website(
+        start_url, link_results=link_results, **crawl_options
+    )
+
+    output_path = Path(output_dir)
+    exported_files = {
+        "pages_csv": export_pages_to_csv(page_results, output_path / "crawl_results.csv"),
+        "pages_json": export_pages_to_json(page_results, output_path / "crawl_results.json"),
+        "links_csv": export_links_to_csv(link_results, output_path / "link_results.csv"),
+        "links_json": export_links_to_json(link_results, output_path / "link_results.json"),
+    }
+
+    print("\nExported files:")
+    for file_path in exported_files.values():
+        print(f"    {file_path}")
+
+    return exported_files
+
+
 if __name__ == "__main__":
     starting_url = "https://en.wikipedia.org/wiki/Web_crawler"
-    crawl_website(starting_url, max_pages=10, max_depth=2)
+    run_crawl_and_export(starting_url, max_pages=10, max_depth=2)
