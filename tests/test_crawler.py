@@ -5116,6 +5116,256 @@ class ContentReadabilityAndKeywordAuditTests(unittest.TestCase):
         self.assertEqual(readability_issues, [])
 
 
+class SiteHealthScoringAndOverviewTests(unittest.TestCase):
+    def test_empty_crawl_results_returns_perfect_score(self):
+        summary = crawler.calculate_site_health_summary([])
+        self.assertEqual(summary["site_health_score"], 100.0)
+        self.assertEqual(summary["health_rating"], "Excellent")
+        self.assertEqual(summary["total_pages_audited"], 0)
+        self.assertEqual(summary["total_findings"], 0)
+        self.assertEqual(summary["severity_counts"], {"error": 0, "warning": 0, "info": 0})
+        self.assertEqual(summary["prioritized_issues"], [])
+        self.assertEqual(summary["top_priority_issues"], [])
+        self.assertEqual(len(summary["categories"]), 9)
+        for cat_key, cat_data in summary["categories"].items():
+            self.assertEqual(cat_data["score"], 100.0)
+            self.assertEqual(cat_data["total_findings"], 0)
+            self.assertEqual(cat_data["status"], "healthy")
+
+    def test_clean_site_returns_perfect_score_and_ratings(self):
+        pages = [
+            {
+                "url": "https://example.com/",
+                "status_code": 200,
+                "content_type": "text/html",
+                "seo_issues": [],
+            },
+            {
+                "url": "https://example.com/about",
+                "status_code": 200,
+                "content_type": "text/html",
+                "seo_issues": [],
+            },
+        ]
+        summary = crawler.calculate_site_health_summary(pages)
+        self.assertEqual(summary["site_health_score"], 100.0)
+        self.assertEqual(summary["health_rating"], "Excellent")
+        self.assertEqual(summary["total_pages_audited"], 2)
+        self.assertEqual(summary["total_findings"], 0)
+
+    def test_score_calculation_with_severity_weighting(self):
+        pages = [
+            {
+                "url": "https://example.com/page-1",
+                "status_code": 200,
+                "content_type": "text/html",
+                "seo_issues": [
+                    {
+                        "type": "missing_lang",
+                        "severity": "error",
+                        "url": "https://example.com/page-1",
+                    }
+                ],
+            },
+            {
+                "url": "https://example.com/page-2",
+                "status_code": 200,
+                "content_type": "text/html",
+                "seo_issues": [
+                    {
+                        "type": "missing_image_alt",
+                        "severity": "warning",
+                        "url": "https://example.com/page-2",
+                    }
+                ],
+            },
+        ]
+        summary = crawler.calculate_site_health_summary(pages)
+        access_cat = summary["categories"]["accessibility"]
+        self.assertEqual(access_cat["pages_audited_count"], 2)
+        self.assertEqual(access_cat["total_findings"], 2)
+        self.assertEqual(access_cat["severity_counts"]["error"], 1)
+        self.assertEqual(access_cat["severity_counts"]["warning"], 1)
+        # Page 1: 100 - 15 = 85.0; Page 2: 100 - 5 = 95.0; Average: 90.0
+        self.assertEqual(access_cat["score"], 90.0)
+        self.assertEqual(access_cat["status"], "healthy")
+
+    def test_page_score_clamping_at_zero(self):
+        # A page with 10 critical errors should not drop below 0
+        many_errors = [
+            {"type": f"error_{i}", "severity": "error", "url": "https://example.com/broken"}
+            for i in range(10)
+        ]
+        pages = [
+            {
+                "url": "https://example.com/broken",
+                "status_code": 200,
+                "content_type": "text/html",
+                "seo_issues": many_errors,
+            },
+            {
+                "url": "https://example.com/healthy",
+                "status_code": 200,
+                "content_type": "text/html",
+                "seo_issues": [],
+            },
+        ]
+        summary = crawler.calculate_site_health_summary(pages)
+        # Broken page score is 0.0 (not negative), healthy page score is 100.0 -> average is 50.0
+        tech_cat = summary["categories"]["technical_seo"]
+        self.assertEqual(tech_cat["score"], 50.0)
+
+    def test_duplicate_issue_handling_on_same_page(self):
+        # Repeated identical issues on the same page are deduplicated
+        pages = [
+            {
+                "url": "https://example.com/page",
+                "status_code": 200,
+                "content_type": "text/html",
+                "seo_issues": [
+                    {"type": "missing_image_alt", "severity": "warning", "url": "https://example.com/page"},
+                    {"type": "missing_image_alt", "severity": "warning", "url": "https://example.com/page"},
+                    {"type": "missing_image_alt", "severity": "warning", "url": "https://example.com/page"},
+                ],
+            }
+        ]
+        summary = crawler.calculate_site_health_summary(pages)
+        access_cat = summary["categories"]["accessibility"]
+        # Deduplicated to 1 finding and 5 points penalty -> score 95.0
+        self.assertEqual(access_cat["total_findings"], 1)
+        self.assertEqual(access_cat["score"], 95.0)
+
+    def test_missing_category_data_does_not_penalize_site(self):
+        # Single language site without hreflang tags or hreflang issues
+        pages = [
+            {
+                "url": "https://example.com/",
+                "status_code": 200,
+                "content_type": "text/html",
+                "hreflang_count": 0,
+                "seo_issues": [],
+            }
+        ]
+        summary = crawler.calculate_site_health_summary(pages)
+        intl_cat = summary["categories"]["international_seo"]
+        self.assertEqual(intl_cat["pages_audited_count"], 0)
+        self.assertEqual(intl_cat["total_findings"], 0)
+        self.assertEqual(intl_cat["score"], 100.0)
+        self.assertEqual(summary["site_health_score"], 100.0)
+
+    def test_site_wide_issues_applied_to_category(self):
+        # Missing sitemap is a site-wide warning (5 points penalty)
+        pages = [
+            {
+                "url": "https://example.com/",
+                "status_code": 200,
+                "content_type": "text/html",
+                "seo_issues": [
+                    {
+                        "type": "missing_sitemap",
+                        "severity": "warning",
+                        "message": "Website has no XML sitemap",
+                        "url": "https://example.com/sitemap.xml",
+                    }
+                ],
+            }
+        ]
+        summary = crawler.calculate_site_health_summary(pages)
+        crawl_cat = summary["categories"]["crawlability"]
+        self.assertEqual(crawl_cat["total_findings"], 1)
+        # 100.0 - 5.0 = 95.0
+        self.assertEqual(crawl_cat["score"], 95.0)
+
+    def test_prioritized_issues_and_actionable_recommendations(self):
+        pages = [
+            {
+                "url": "https://example.com/p1",
+                "status_code": 200,
+                "content_type": "text/html",
+                "seo_issues": [
+                    {"type": "missing_title", "severity": "warning", "message": "Missing title", "url": "https://example.com/p1"},
+                    {"type": "broken_external_link", "severity": "error", "message": "External 404", "url": "https://example.com/p1"},
+                ],
+            },
+            {
+                "url": "https://example.com/p2",
+                "status_code": 200,
+                "content_type": "text/html",
+                "seo_issues": [
+                    {"type": "broken_external_link", "severity": "error", "message": "External 404", "url": "https://example.com/p2"},
+                ],
+            },
+        ]
+        summary = crawler.calculate_site_health_summary(pages)
+        prioritized = summary["prioritized_issues"]
+        self.assertGreaterEqual(len(prioritized), 2)
+        # Error (broken_external_link) should rank ahead of warning (missing_title)
+        self.assertEqual(prioritized[0]["issue_type"], "broken_external_link")
+        self.assertEqual(prioritized[0]["severity"], "error")
+        self.assertEqual(prioritized[0]["affected_pages_count"], 2)
+        self.assertIn("Fix or remove external links", prioritized[0]["recommendation"])
+
+        self.assertEqual(prioritized[1]["issue_type"], "missing_title")
+        self.assertEqual(prioritized[1]["severity"], "warning")
+        self.assertEqual(prioritized[1]["affected_pages_count"], 1)
+        self.assertIn("<title>", prioritized[1]["recommendation"])
+
+    def test_health_rating_ranges(self):
+        # 1. Clean site -> Excellent (100.0)
+        clean = [{"url": "https://example.com/", "status_code": 200, "content_type": "text/html", "seo_issues": []}]
+        self.assertEqual(crawler.calculate_site_health_summary(clean)["health_rating"], "Excellent")
+
+        # 2. 1 error in each category (-15 each -> each category 85.0 -> overall 85.0 -> Good)
+        good_issues = [
+            {"type": "missing_title", "severity": "error", "url": "https://example.com/"},
+            {"type": "thin_content", "severity": "error", "url": "https://example.com/"},
+            {"type": "orphan_page", "severity": "error", "url": "https://example.com/"},
+            {"type": "missing_lang", "severity": "error", "url": "https://example.com/"},
+            {"type": "slow_response", "severity": "error", "url": "https://example.com/"},
+            {"type": "http_page", "severity": "error", "url": "https://example.com/"},
+            {"type": "missing_og_title", "severity": "error", "url": "https://example.com/"},
+            {"type": "missing_structured_data", "severity": "error", "url": "https://example.com/"},
+        ]
+        good_pages = [{"url": "https://example.com/", "status_code": 200, "content_type": "text/html", "response_time_ms": 100, "seo_issues": good_issues}]
+        res_good = crawler.calculate_site_health_summary(good_pages)
+        self.assertEqual(res_good["site_health_score"], 85.0)
+        self.assertEqual(res_good["health_rating"], "Good")
+
+        # 3. 3 errors in each category (-45 each -> each category 55.0 -> overall 55.0 -> Fair)
+        fair_issues = list(good_issues) + [
+            {"type": "title_too_short", "severity": "error", "url": "https://example.com/"},
+            {"type": "missing_canonical", "severity": "error", "url": "https://example.com/"},
+            {"type": "keyword_stuffing", "severity": "error", "url": "https://example.com/"},
+            {"type": "low_content_readability", "severity": "error", "url": "https://example.com/"},
+            {"type": "deep_page", "severity": "error", "url": "https://example.com/"},
+            {"type": "noindex_page", "severity": "error", "url": "https://example.com/"},
+            {"type": "missing_form_label", "severity": "error", "url": "https://example.com/"},
+            {"type": "empty_link", "severity": "error", "url": "https://example.com/"},
+            {"type": "very_slow_response", "severity": "error", "url": "https://example.com/"},
+            {"type": "large_page_size", "severity": "error", "url": "https://example.com/"},
+            {"type": "mixed_content", "severity": "error", "url": "https://example.com/"},
+            {"type": "insecure_form_action", "severity": "error", "url": "https://example.com/"},
+            {"type": "missing_og_description", "severity": "error", "url": "https://example.com/"},
+            {"type": "missing_og_image", "severity": "error", "url": "https://example.com/"},
+            {"type": "invalid_json_ld", "severity": "error", "url": "https://example.com/"},
+            {"type": "missing_required_schema_field", "severity": "error", "url": "https://example.com/"},
+        ]
+        fair_pages = [{"url": "https://example.com/", "status_code": 200, "content_type": "text/html", "response_time_ms": 100, "seo_issues": fair_issues}]
+        res_fair = crawler.calculate_site_health_summary(fair_pages)
+        self.assertEqual(res_fair["site_health_score"], 55.0)
+        self.assertEqual(res_fair["health_rating"], "Fair")
+
+        # 4. Severe penalties -> Poor (< 50)
+        poor_issues = list(fair_issues) + [
+            {"type": f"err_p_{i}", "severity": "error", "url": "https://example.com/"}
+            for i in range(30)
+        ]
+        poor_pages = [{"url": "https://example.com/", "status_code": 200, "content_type": "text/html", "response_time_ms": 100, "seo_issues": poor_issues}]
+        res_poor = crawler.calculate_site_health_summary(poor_pages)
+        self.assertLess(res_poor["site_health_score"], 50.0)
+        self.assertEqual(res_poor["health_rating"], "Poor")
+
+
 if __name__ == "__main__":
     unittest.main()
 

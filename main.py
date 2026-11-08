@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 
 from crawler import (
+    calculate_site_health_summary,
     crawl_website,
     summarize_external_links,
     summarize_hreflang_audit,
@@ -83,6 +84,7 @@ def run_crawl(request: CrawlRequest) -> dict[str, Any]:
         "hreflang_summary": summarize_hreflang_audit(pages),
         "social_summary": summarize_social_audit(pages),
         "readability_summary": summarize_readability_audit(pages),
+        "site_health_summary": calculate_site_health_summary(pages),
         "pages": pages,
         "links": links,
     }

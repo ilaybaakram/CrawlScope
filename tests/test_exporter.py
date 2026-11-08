@@ -453,6 +453,30 @@ class CrawlerFieldCompatibilityTests(unittest.TestCase):
             self.assertIn(f'"{field}"', source)
 
 
+class SiteHealthExportTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.folder = Path(self.temp_dir.name)
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def test_export_site_health_to_json_writes_json_file(self):
+        summary = {
+            "site_health_score": 92.5,
+            "health_rating": "Excellent",
+            "total_pages_audited": 5,
+            "total_findings": 2,
+        }
+        target = self.folder / "site_health_summary.json"
+        path = exporter.export_site_health_to_json(summary, target)
+        self.assertEqual(path, target)
+        self.assertTrue(target.exists())
+        loaded = json.loads(target.read_text(encoding="utf-8"))
+        self.assertEqual(loaded["site_health_score"], 92.5)
+        self.assertEqual(loaded["health_rating"], "Excellent")
+
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -108,3 +108,14 @@ def export_links_to_json(link_results: list[dict[str, Any]], file_path: str | Pa
     """Write link check results to a JSON file. Empty results write an empty list."""
     return _write_json(link_results, file_path)
 
+
+def export_site_health_to_json(
+    site_health_summary: dict[str, Any], file_path: str | Path
+) -> Path:
+    """Write site health summary and audit overview to a JSON file."""
+    path = _prepare_file_path(file_path)
+    with path.open("w", encoding="utf-8") as json_file:
+        json.dump(site_health_summary, json_file, indent=2, ensure_ascii=False)
+        json_file.write("\n")
+    return path
+

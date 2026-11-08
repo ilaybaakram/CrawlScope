@@ -435,6 +435,32 @@ function App() {
       ).length,
     },
   };
+
+  const siteHealth = crawlData?.site_health_summary || {
+    site_health_score: 100,
+    health_rating: "Excellent",
+    total_pages_audited: pages.length,
+    total_findings: seoIssues.length,
+    severity_counts: {
+      error: seoIssues.filter((i) => i.severity === "error").length,
+      warning: seoIssues.filter((i) => i.severity === "warning").length,
+      info: seoIssues.filter((i) => i.severity === "info").length,
+    },
+    categories: {
+      technical_seo: { name: "Technical SEO", score: 100, pages_audited_count: 0, total_findings: 0, severity_counts: { error: 0, warning: 0, info: 0 }, status: "healthy" },
+      content_quality: { name: "Content Quality", score: 100, pages_audited_count: 0, total_findings: 0, severity_counts: { error: 0, warning: 0, info: 0 }, status: "healthy" },
+      crawlability: { name: "Crawlability & Internal Linking", score: 100, pages_audited_count: 0, total_findings: 0, severity_counts: { error: 0, warning: 0, info: 0 }, status: "healthy" },
+      accessibility: { name: "Accessibility", score: 100, pages_audited_count: 0, total_findings: 0, severity_counts: { error: 0, warning: 0, info: 0 }, status: "healthy" },
+      performance: { name: "Performance", score: 100, pages_audited_count: 0, total_findings: 0, severity_counts: { error: 0, warning: 0, info: 0 }, status: "healthy" },
+      security: { name: "Security & HTTPS", score: 100, pages_audited_count: 0, total_findings: 0, severity_counts: { error: 0, warning: 0, info: 0 }, status: "healthy" },
+      international_seo: { name: "International SEO", score: 100, pages_audited_count: 0, total_findings: 0, severity_counts: { error: 0, warning: 0, info: 0 }, status: "healthy" },
+      social_sharing: { name: "Social Sharing", score: 100, pages_audited_count: 0, total_findings: 0, severity_counts: { error: 0, warning: 0, info: 0 }, status: "healthy" },
+      structured_data: { name: "Structured Data", score: 100, pages_audited_count: 0, total_findings: 0, severity_counts: { error: 0, warning: 0, info: 0 }, status: "healthy" },
+    },
+    prioritized_issues: [],
+    top_priority_issues: [],
+  };
+
   const canDownload = Boolean(crawlData) && !isLoading;
 
   function handleDownloadPagesCsv() {
@@ -465,6 +491,16 @@ function App() {
     triggerBrowserDownload(
       content,
       "link_results.json",
+      "application/json;charset=utf-8"
+    );
+  }
+
+  function handleDownloadSiteHealthJson() {
+    if (!crawlData) return;
+    const content = JSON.stringify(siteHealth, null, 2);
+    triggerBrowserDownload(
+      content,
+      "site_health_summary.json",
       "application/json;charset=utf-8"
     );
   }
@@ -585,6 +621,142 @@ function App() {
           <span className="summary-value">{brokenLinks.length}</span>
         </div>
       </section>
+
+      <section className="card site-health-card">
+        <div className="section-header">
+          <h2>Site Health &amp; Audit Overview</h2>
+          <span className="section-hint">
+            Comprehensive audit scoring across all 9 technical categories
+          </span>
+        </div>
+
+        <div className="site-health-header">
+          <div className="site-health-main">
+            <div
+              className={`site-health-score-circle ${
+                !crawlData
+                  ? "score-good"
+                  : siteHealth.site_health_score >= 90
+                  ? "score-excellent"
+                  : siteHealth.site_health_score >= 70
+                  ? "score-good"
+                  : siteHealth.site_health_score >= 50
+                  ? "score-fair"
+                  : "score-poor"
+              }`}
+            >
+              <span>{crawlData ? siteHealth.site_health_score : "—"}</span>
+            </div>
+            <div className="site-health-meta">
+              <span className="site-health-rating">
+                {crawlData ? `${siteHealth.health_rating} Health Rating` : "Run crawl to calculate"}
+              </span>
+              <span className="site-health-subtitle">
+                {crawlData
+                  ? `${siteHealth.total_pages_audited} pages evaluated · ${siteHealth.total_findings} total findings`
+                  : "Comprehensive 0–100 score based on weighted error, warning, and notice findings"}
+              </span>
+            </div>
+          </div>
+
+          <div className="seo-metrics">
+            <span className="metric-badge">
+              Pages Audited: <strong>{crawlData ? siteHealth.total_pages_audited : 0}</strong>
+            </span>
+            <span className="metric-badge">
+              Errors: <strong style={{ color: "#dc2626" }}>{crawlData ? siteHealth.severity_counts.error : 0}</strong>
+            </span>
+            <span className="metric-badge">
+              Warnings: <strong style={{ color: "#d97706" }}>{crawlData ? siteHealth.severity_counts.warning : 0}</strong>
+            </span>
+            <span className="metric-badge">
+              Notices: <strong style={{ color: "#0284c7" }}>{crawlData ? siteHealth.severity_counts.info : 0}</strong>
+            </span>
+          </div>
+        </div>
+
+        <h3 style={{ marginTop: "1.25rem", marginBottom: "0.25rem", fontSize: "1.05rem" }}>
+          Category Health Breakdown
+        </h3>
+        <div className="category-scores-grid">
+          {Object.entries(siteHealth.categories || {}).map(([key, cat]) => (
+            <div key={key} className="category-score-card">
+              <div className="category-score-card-header">
+                <span className="category-title">{cat.name}</span>
+                <span
+                  className={`category-score-val ${
+                    !crawlData
+                      ? "status-ok"
+                      : cat.score >= 90
+                      ? "status-ok"
+                      : cat.score >= 70
+                      ? "status-warning"
+                      : "status-bad"
+                  }`}
+                >
+                  {crawlData ? `${cat.score}` : "—"}
+                </span>
+              </div>
+              <div className="category-details">
+                <span>Audited: {crawlData ? cat.pages_audited_count : 0}</span>
+                <span>Findings: {crawlData ? cat.total_findings : 0}</span>
+              </div>
+              <div className="category-severities">
+                {cat.severity_counts.error > 0 && (
+                  <span className="status-pill status-bad">{cat.severity_counts.error} error(s)</span>
+                )}
+                {cat.severity_counts.warning > 0 && (
+                  <span className="status-pill status-warning">{cat.severity_counts.warning} warning(s)</span>
+                )}
+                {cat.severity_counts.info > 0 && (
+                  <span className="status-pill status-info">{cat.severity_counts.info} notice(s)</span>
+                )}
+                {cat.total_findings === 0 && (
+                  <span className="status-pill status-ok">Pass / Healthy</span>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      {crawlData && (siteHealth.prioritized_issues || []).length > 0 && (
+        <section className="card">
+          <div className="section-header">
+            <h2>Prioritized Actionable Findings</h2>
+            <span className="section-hint">
+              Top recommendations ranked by severity and site-wide impact
+            </span>
+          </div>
+          <div className="prioritized-issues-list">
+            {(siteHealth.prioritized_issues || []).slice(0, 8).map((issue) => (
+              <div key={issue.issue_type} className="prioritized-issue-item">
+                <div className="prioritized-issue-header">
+                  <code>{issue.issue_type}</code>
+                  <span
+                    className={
+                      issue.severity === "error"
+                        ? "status-pill status-bad"
+                        : issue.severity === "info"
+                        ? "status-pill status-info"
+                        : "status-pill status-warning"
+                    }
+                  >
+                    {issue.severity}
+                  </span>
+                  <span className="metric-badge">{issue.category_name}</span>
+                  <span className="affected-badge">
+                    {issue.affected_pages_count} page(s) affected ({issue.total_occurrences} occurrence{issue.total_occurrences > 1 ? "s" : ""})
+                  </span>
+                </div>
+                <div className="prioritized-recommendation">
+                  <strong>Recommendation:</strong> {issue.recommendation}
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
       <section className="card">
         <div className="section-header">
@@ -878,6 +1050,14 @@ function App() {
             disabled={!canDownload}
           >
             Download Links JSON
+          </button>
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={handleDownloadSiteHealthJson}
+            disabled={!canDownload}
+          >
+            Download Site Health JSON
           </button>
         </div>
       </section>

@@ -5972,6 +5972,634 @@ def summarize_readability_audit(results: list[dict[str, Any]]) -> dict[str, Any]
     }
 
 
+# =============================================================================
+# Site Health Scoring & SEO Audit Overview
+# =============================================================================
+
+CATEGORY_TECHNICAL_SEO = "technical_seo"
+CATEGORY_CONTENT_QUALITY = "content_quality"
+CATEGORY_CRAWLABILITY = "crawlability"
+CATEGORY_ACCESSIBILITY = "accessibility"
+CATEGORY_PERFORMANCE = "performance"
+CATEGORY_SECURITY = "security"
+CATEGORY_INTERNATIONAL_SEO = "international_seo"
+CATEGORY_SOCIAL_SHARING = "social_sharing"
+CATEGORY_STRUCTURED_DATA = "structured_data"
+
+ALL_CATEGORIES: list[str] = [
+    CATEGORY_TECHNICAL_SEO,
+    CATEGORY_CONTENT_QUALITY,
+    CATEGORY_CRAWLABILITY,
+    CATEGORY_ACCESSIBILITY,
+    CATEGORY_PERFORMANCE,
+    CATEGORY_SECURITY,
+    CATEGORY_INTERNATIONAL_SEO,
+    CATEGORY_SOCIAL_SHARING,
+    CATEGORY_STRUCTURED_DATA,
+]
+
+CATEGORY_NAMES: dict[str, str] = {
+    CATEGORY_TECHNICAL_SEO: "Technical SEO",
+    CATEGORY_CONTENT_QUALITY: "Content Quality",
+    CATEGORY_CRAWLABILITY: "Crawlability & Internal Linking",
+    CATEGORY_ACCESSIBILITY: "Accessibility",
+    CATEGORY_PERFORMANCE: "Performance",
+    CATEGORY_SECURITY: "Security & HTTPS",
+    CATEGORY_INTERNATIONAL_SEO: "International SEO",
+    CATEGORY_SOCIAL_SHARING: "Social Sharing",
+    CATEGORY_STRUCTURED_DATA: "Structured Data",
+}
+
+SEVERITY_WEIGHTS: dict[str, float] = {
+    "error": 15.0,
+    "warning": 5.0,
+    "info": 1.0,
+}
+
+ISSUE_CATEGORY_MAP: dict[str, str] = {
+    # Technical SEO
+    "missing_title": CATEGORY_TECHNICAL_SEO,
+    "title_too_short": CATEGORY_TECHNICAL_SEO,
+    "title_too_long": CATEGORY_TECHNICAL_SEO,
+    "duplicate_title": CATEGORY_TECHNICAL_SEO,
+    "missing_meta_description": CATEGORY_TECHNICAL_SEO,
+    "meta_description_too_short": CATEGORY_TECHNICAL_SEO,
+    "meta_description_too_long": CATEGORY_TECHNICAL_SEO,
+    "duplicate_meta_description": CATEGORY_TECHNICAL_SEO,
+    "missing_h1": CATEGORY_TECHNICAL_SEO,
+    "multiple_h1": CATEGORY_TECHNICAL_SEO,
+    "missing_canonical": CATEGORY_TECHNICAL_SEO,
+    "canonical_mismatch": CATEGORY_TECHNICAL_SEO,
+    "non_absolute_canonical": CATEGORY_TECHNICAL_SEO,
+    "multiple_canonicals": CATEGORY_TECHNICAL_SEO,
+    "invalid_canonical": CATEGORY_TECHNICAL_SEO,
+    "cross_domain_canonical": CATEGORY_TECHNICAL_SEO,
+    "canonical_redirect": CATEGORY_TECHNICAL_SEO,
+    "redirect_url": CATEGORY_TECHNICAL_SEO,
+    "redirect_chain": CATEGORY_TECHNICAL_SEO,
+    "redirect_loop": CATEGORY_TECHNICAL_SEO,
+    "uppercase_url": CATEGORY_TECHNICAL_SEO,
+    "underscore_url": CATEGORY_TECHNICAL_SEO,
+    "long_url": CATEGORY_TECHNICAL_SEO,
+    "query_parameter_url": CATEGORY_TECHNICAL_SEO,
+    "broken_image": CATEGORY_TECHNICAL_SEO,
+
+    # Content Quality
+    "thin_content": CATEGORY_CONTENT_QUALITY,
+    "low_word_count": CATEGORY_CONTENT_QUALITY,
+    "excessive_word_count": CATEGORY_CONTENT_QUALITY,
+    "duplicate_content": CATEGORY_CONTENT_QUALITY,
+    "missing_content": CATEGORY_CONTENT_QUALITY,
+    "keyword_stuffing": CATEGORY_CONTENT_QUALITY,
+    "low_content_readability": CATEGORY_CONTENT_QUALITY,
+    "short_paragraphs": CATEGORY_CONTENT_QUALITY,
+    "long_paragraphs": CATEGORY_CONTENT_QUALITY,
+    "missing_subheadings": CATEGORY_CONTENT_QUALITY,
+    "heading_repetition": CATEGORY_CONTENT_QUALITY,
+    "weak_content_relevance": CATEGORY_CONTENT_QUALITY,
+    "heading_content_mismatch": CATEGORY_CONTENT_QUALITY,
+    "missing_primary_heading": CATEGORY_CONTENT_QUALITY,
+    "multiple_primary_headings": CATEGORY_CONTENT_QUALITY,
+
+    # Crawlability & Internal Linking
+    "orphan_page": CATEGORY_CRAWLABILITY,
+    "low_internal_link_count": CATEGORY_CRAWLABILITY,
+    "deep_page": CATEGORY_CRAWLABILITY,
+    "nofollow_internal_link": CATEGORY_CRAWLABILITY,
+    "excessive_internal_links": CATEGORY_CRAWLABILITY,
+    "duplicate_anchor_text": CATEGORY_CRAWLABILITY,
+    "isolated_page_cluster": CATEGORY_CRAWLABILITY,
+    "isolated_section": CATEGORY_CRAWLABILITY,
+    "noindex_page": CATEGORY_CRAWLABILITY,
+    "nofollow_page": CATEGORY_CRAWLABILITY,
+    "empty_meta_robots": CATEGORY_CRAWLABILITY,
+    "multiple_meta_robots": CATEGORY_CRAWLABILITY,
+    "conflicting_robots_directives": CATEGORY_CRAWLABILITY,
+    "disallowed_by_robots": CATEGORY_CRAWLABILITY,
+    "missing_robots_txt": CATEGORY_CRAWLABILITY,
+    "invalid_robots_txt": CATEGORY_CRAWLABILITY,
+    "excessive_robots_disallow": CATEGORY_CRAWLABILITY,
+    "robots_blocked_crawled_url": CATEGORY_CRAWLABILITY,
+    "robots_blocked_sitemap_url": CATEGORY_CRAWLABILITY,
+    "robots_sitemap_missing": CATEGORY_CRAWLABILITY,
+    "missing_sitemap": CATEGORY_CRAWLABILITY,
+    "invalid_sitemap": CATEGORY_CRAWLABILITY,
+    "sitemap_url_not_crawled": CATEGORY_CRAWLABILITY,
+    "crawled_url_missing_from_sitemap": CATEGORY_CRAWLABILITY,
+    "sitemap_noncanonical_url": CATEGORY_CRAWLABILITY,
+    "sitemap_redirect_url": CATEGORY_CRAWLABILITY,
+    "sitemap_broken_url": CATEGORY_CRAWLABILITY,
+    "sitemap_non_indexable_url": CATEGORY_CRAWLABILITY,
+    "broken_external_link": CATEGORY_CRAWLABILITY,
+    "external_redirect": CATEGORY_CRAWLABILITY,
+    "external_link_timeout": CATEGORY_CRAWLABILITY,
+    "external_link_ssl_error": CATEGORY_CRAWLABILITY,
+    "nofollow_external_link": CATEGORY_CRAWLABILITY,
+    "excessive_external_links": CATEGORY_CRAWLABILITY,
+
+    # Accessibility
+    "missing_lang": CATEGORY_ACCESSIBILITY,
+    "missing_form_label": CATEGORY_ACCESSIBILITY,
+    "empty_button": CATEGORY_ACCESSIBILITY,
+    "empty_link": CATEGORY_ACCESSIBILITY,
+    "vague_link_text": CATEGORY_ACCESSIBILITY,
+    "heading_hierarchy": CATEGORY_ACCESSIBILITY,
+    "duplicate_id": CATEGORY_ACCESSIBILITY,
+    "missing_main_landmark": CATEGORY_ACCESSIBILITY,
+    "missing_landmark": CATEGORY_ACCESSIBILITY,
+    "low_contrast": CATEGORY_ACCESSIBILITY,
+    "missing_image_alt": CATEGORY_ACCESSIBILITY,
+    "empty_image_alt": CATEGORY_ACCESSIBILITY,
+
+    # Performance
+    "slow_response": CATEGORY_PERFORMANCE,
+    "very_slow_response": CATEGORY_PERFORMANCE,
+    "large_page_size": CATEGORY_PERFORMANCE,
+    "very_large_page_size": CATEGORY_PERFORMANCE,
+    "slow_crawl": CATEGORY_PERFORMANCE,
+
+    # Security & HTTPS
+    "http_page": CATEGORY_SECURITY,
+    "http_internal_link": CATEGORY_SECURITY,
+    "mixed_content": CATEGORY_SECURITY,
+    "external_link_to_http": CATEGORY_SECURITY,
+    "insecure_form_action": CATEGORY_SECURITY,
+    "sensitive_form_over_http": CATEGORY_SECURITY,
+    "missing_hsts": CATEGORY_SECURITY,
+    "missing_content_security_policy": CATEGORY_SECURITY,
+    "missing_x_content_type_options": CATEGORY_SECURITY,
+    "missing_x_frame_options": CATEGORY_SECURITY,
+    "missing_referrer_policy": CATEGORY_SECURITY,
+    "missing_permissions_policy": CATEGORY_SECURITY,
+    "insecure_external_resource": CATEGORY_SECURITY,
+    "external_link_target_blank_noopener": CATEGORY_SECURITY,
+    "external_link_target_blank_noreferrer": CATEGORY_SECURITY,
+
+    # International SEO
+    "missing_hreflang": CATEGORY_INTERNATIONAL_SEO,
+    "invalid_hreflang": CATEGORY_INTERNATIONAL_SEO,
+    "hreflang_missing_return_link": CATEGORY_INTERNATIONAL_SEO,
+    "hreflang_target_not_crawled": CATEGORY_INTERNATIONAL_SEO,
+    "hreflang_noncanonical_target": CATEGORY_INTERNATIONAL_SEO,
+    "hreflang_missing_self_reference": CATEGORY_INTERNATIONAL_SEO,
+    "hreflang_missing_x_default": CATEGORY_INTERNATIONAL_SEO,
+    "hreflang_canonical_conflict": CATEGORY_INTERNATIONAL_SEO,
+    "duplicate_hreflang_language": CATEGORY_INTERNATIONAL_SEO,
+    "hreflang_http_url": CATEGORY_INTERNATIONAL_SEO,
+
+    # Social Sharing
+    "missing_og_title": CATEGORY_SOCIAL_SHARING,
+    "missing_og_description": CATEGORY_SOCIAL_SHARING,
+    "missing_og_image": CATEGORY_SOCIAL_SHARING,
+    "missing_og_url": CATEGORY_SOCIAL_SHARING,
+    "missing_og_type": CATEGORY_SOCIAL_SHARING,
+    "invalid_og_url": CATEGORY_SOCIAL_SHARING,
+    "og_url_canonical_conflict": CATEGORY_SOCIAL_SHARING,
+    "og_image_invalid_url": CATEGORY_SOCIAL_SHARING,
+    "duplicate_og_tags": CATEGORY_SOCIAL_SHARING,
+    "empty_og_metadata": CATEGORY_SOCIAL_SHARING,
+    "short_og_title": CATEGORY_SOCIAL_SHARING,
+    "long_og_title": CATEGORY_SOCIAL_SHARING,
+    "short_og_description": CATEGORY_SOCIAL_SHARING,
+    "long_og_description": CATEGORY_SOCIAL_SHARING,
+    "social_image_missing_alt": CATEGORY_SOCIAL_SHARING,
+    "missing_twitter_card": CATEGORY_SOCIAL_SHARING,
+    "missing_twitter_title": CATEGORY_SOCIAL_SHARING,
+    "missing_twitter_description": CATEGORY_SOCIAL_SHARING,
+    "missing_twitter_image": CATEGORY_SOCIAL_SHARING,
+    "invalid_twitter_card": CATEGORY_SOCIAL_SHARING,
+
+    # Structured Data
+    "missing_structured_data": CATEGORY_STRUCTURED_DATA,
+    "invalid_json_ld": CATEGORY_STRUCTURED_DATA,
+    "missing_required_schema_field": CATEGORY_STRUCTURED_DATA,
+    "duplicate_schema_type": CATEGORY_STRUCTURED_DATA,
+}
+
+ISSUE_RECOMMENDATIONS: dict[str, str] = {
+    # Technical SEO
+    "missing_title": "Add a unique and descriptive <title> tag (30–60 characters) to each page.",
+    "title_too_short": "Expand the title tag to at least 30 characters to accurately summarize page content.",
+    "title_too_long": "Shorten the title tag to under 60 characters to avoid truncation in search engine results.",
+    "duplicate_title": "Ensure each page has a unique title tag to prevent keyword cannibalization.",
+    "missing_meta_description": "Add a compelling meta description (70–160 characters) to improve search click-through rates.",
+    "meta_description_too_short": "Expand the meta description to at least 70 characters to provide sufficient context for searchers.",
+    "meta_description_too_long": "Keep meta descriptions under 160 characters to prevent snippet truncation on search result pages.",
+    "duplicate_meta_description": "Provide a distinct meta description for every page across the website.",
+    "missing_h1": "Add a single primary <h1> heading that clearly describes the page topic.",
+    "multiple_h1": "Use only one visible <h1> heading per page to establish clear document hierarchy.",
+    "missing_canonical": "Specify a canonical link (<link rel='canonical'>) pointing to the preferred page URL.",
+    "canonical_mismatch": "Align canonical link with the current URL or target destination to avoid ranking dilution.",
+    "non_absolute_canonical": "Use fully qualified absolute URLs in canonical tags (e.g., https://example.com/page).",
+    "multiple_canonicals": "Remove duplicate canonical tags so search engines have an unambiguous canonical target.",
+    "invalid_canonical": "Ensure the canonical tag contains a valid, well-formed HTTP/HTTPS URL.",
+    "cross_domain_canonical": "Verify that cross-domain canonical URLs deliberately delegate ranking authority to the external domain.",
+    "canonical_redirect": "Update canonical tags to point directly to final destination URLs rather than redirecting URLs.",
+    "redirect_url": "Update internal links to point directly to the target URL rather than intermediate redirects.",
+    "redirect_chain": "Eliminate multi-hop redirect chains by pointing links straight to the final destination.",
+    "redirect_loop": "Resolve redirect loops that prevent crawlers and users from reaching target content.",
+    "uppercase_url": "Use lowercase URLs to prevent duplicate indexing issues on case-sensitive web servers.",
+    "underscore_url": "Use hyphens instead of underscores to separate words in URL paths.",
+    "long_url": "Keep URL paths concise and readable for both users and search engines.",
+    "query_parameter_url": "Consider clean URL structures without non-essential tracking or query parameters.",
+    "broken_image": "Fix or replace broken image sources returning HTTP 4xx or 5xx status codes.",
+
+    # Content Quality
+    "thin_content": "Add substantive, informative content (minimum 300 words) to provide value to visitors.",
+    "low_word_count": "Expand page content to thoroughly address the intended search query or topic.",
+    "excessive_word_count": "Consider dividing exceptionally long pages into focused topical articles with clear navigation.",
+    "duplicate_content": "Rewrite or consolidate duplicate content across pages to preserve search ranking signals.",
+    "missing_content": "Ensure main body content renders properly without requiring client-side script execution.",
+    "keyword_stuffing": "Reduce repetitive keyword usage; maintain natural language density under 5%.",
+    "low_content_readability": "Simplify sentence structures and vocabulary to improve readability and user comprehension.",
+    "short_paragraphs": "Combine brief one-line paragraphs into cohesive, developed thoughts.",
+    "long_paragraphs": "Break up oversized paragraphs (over 150 words) to improve scannability on web screens.",
+    "missing_subheadings": "Structure long content with <h2> and <h3> subheadings to organize topics effectively.",
+    "heading_repetition": "Use distinct, informative heading text for each section rather than repeating identical titles.",
+    "weak_content_relevance": "Align body content with the keywords and themes promised by the title and main heading.",
+    "heading_content_mismatch": "Ensure the primary <h1> heading directly relates to the topics introduced in the title tag.",
+    "missing_primary_heading": "Provide a visible <h1> heading at the top of the body content.",
+    "multiple_primary_headings": "Consolidate multiple <h1> tags into subheadings (<h2>/<h3>) under a single primary <h1>.",
+
+    # Crawlability & Internal Linking
+    "orphan_page": "Add internal links from category or navigation pages to ensure this page can be discovered.",
+    "low_internal_link_count": "Increase internal links to this page from relevant context throughout the site.",
+    "deep_page": "Flatten site architecture so important pages are reachable within 3 to 4 clicks from the homepage.",
+    "nofollow_internal_link": "Remove rel='nofollow' from internal links so search engines can freely crawl and index your site.",
+    "excessive_internal_links": "Limit internal links per page to maintain clear navigation and distribute link equity effectively.",
+    "duplicate_anchor_text": "Use descriptive, specific anchor text that reflects the distinct destination of each link.",
+    "isolated_page_cluster": "Link isolated clusters of pages back into the main website hierarchy.",
+    "isolated_section": "Ensure all sections have two-way navigational links with the rest of the site.",
+    "noindex_page": "Remove 'noindex' meta tags from pages that you want search engines to discover and index.",
+    "nofollow_page": "Remove 'nofollow' directives if you want search engines to follow outbound links from this page.",
+    "empty_meta_robots": "Specify valid directives (e.g., 'index, follow') or remove empty meta robots tags.",
+    "multiple_meta_robots": "Consolidate duplicate meta robots tags into a single consistent directive.",
+    "conflicting_robots_directives": "Resolve conflicting robots instructions (such as index vs noindex) to prevent crawl confusion.",
+    "disallowed_by_robots": "Review robots.txt disallow rules if this page was blocked from search crawling unintentionally.",
+    "missing_robots_txt": "Publish a valid robots.txt file at the domain root with standard crawl directives.",
+    "invalid_robots_txt": "Fix syntax errors in robots.txt to ensure crawlers interpret disallow and allow rules correctly.",
+    "excessive_robots_disallow": "Review broad disallow rules to ensure valuable content is not inadvertently hidden from search engines.",
+    "robots_blocked_crawled_url": "Ensure pages that are crawled internally are not simultaneously blocked by robots.txt.",
+    "robots_blocked_sitemap_url": "Remove sitemap URLs from robots.txt disallow rules so crawlers can access them.",
+    "robots_sitemap_missing": "Add a Sitemap directive to robots.txt (e.g., Sitemap: https://example.com/sitemap.xml).",
+    "missing_sitemap": "Generate and publish an XML sitemap at /sitemap.xml to accelerate page discovery.",
+    "invalid_sitemap": "Validate XML sitemap syntax according to the sitemaps.org protocol schema.",
+    "sitemap_url_not_crawled": "Check why sitemap URLs were not reached during the crawl and ensure they are internally linked.",
+    "crawled_url_missing_from_sitemap": "Add valuable crawled pages to the XML sitemap to ensure search engines have complete coverage.",
+    "sitemap_noncanonical_url": "Only list canonical URLs in XML sitemaps; remove non-canonical URLs.",
+    "sitemap_redirect_url": "Replace redirecting URLs in the XML sitemap with their final 200 OK destinations.",
+    "sitemap_broken_url": "Remove broken URLs (4xx/5xx) from the XML sitemap immediately.",
+    "sitemap_non_indexable_url": "Remove non-indexable (noindex or blocked) URLs from XML sitemaps.",
+    "broken_external_link": "Fix or remove external links returning HTTP 4xx or 5xx error codes.",
+    "external_redirect": "Update external links to point directly to destination URLs to avoid redirect delays.",
+    "external_link_timeout": "Verify external destination server responsiveness or remove unreachable links.",
+    "external_link_ssl_error": "Verify that external links have valid, up-to-date TLS/SSL certificates.",
+    "nofollow_external_link": "Evaluate whether nofollow is necessary, or use rel='sponsored' / rel='ugc' where appropriate.",
+    "excessive_external_links": "Moderate outgoing external links to keep readers focused on your site's content.",
+
+    # Accessibility
+    "missing_lang": "Add a language attribute to the root element (e.g., <html lang='en'>) for screen reader support.",
+    "missing_form_label": "Provide explicit <label> elements or aria-label attributes for all interactive form controls.",
+    "empty_button": "Provide accessible text or aria-label for all button elements.",
+    "empty_link": "Ensure all links contain visible text or an aria-label describing their destination.",
+    "vague_link_text": "Replace ambiguous link phrases like 'click here' with meaningful, descriptive text.",
+    "heading_hierarchy": "Structure headings sequentially without skipping levels (e.g., H1 -> H2 -> H3).",
+    "duplicate_id": "Ensure every HTML id attribute is unique across the page.",
+    "missing_main_landmark": "Enclose primary page content in a <main> landmark element for keyboard and screen reader navigation.",
+    "missing_landmark": "Use structural landmark elements (<header>, <nav>, <main>, <footer>) to organize page regions.",
+    "low_contrast": "Increase color contrast between text and background to satisfy WCAG AA standards (minimum 4.5:1).",
+    "missing_image_alt": "Add descriptive alt attributes to all <img> tags to convey image content to visually impaired users.",
+    "empty_image_alt": "Provide informative alt text, or use alt='' only for purely decorative graphics.",
+
+    # Performance
+    "slow_response": "Optimize server response time and enable caching so pages load in under 2 seconds.",
+    "very_slow_response": "Investigate database queries, backend processing bottlenecks, or server hosting to resolve latency over 5 seconds.",
+    "large_page_size": "Minify HTML and assets to reduce uncompressed document size below 1 MB.",
+    "very_large_page_size": "Significantly streamline inline assets and large DOM nodes to keep page weight below 3 MB.",
+    "slow_crawl": "Improve server throughput and response latency to support efficient web crawler indexation.",
+
+    # Security & HTTPS
+    "http_page": "Serve all pages over secure HTTPS and redirect HTTP requests with 301 redirects.",
+    "http_internal_link": "Update internal links to use https:// protocols rather than insecure http://.",
+    "mixed_content": "Change asset URLs (images, scripts, styles) from http:// to https:// to prevent browser blocking.",
+    "external_link_to_http": "Prefer secure https:// links when linking to external websites.",
+    "insecure_form_action": "Set form action endpoints to secure HTTPS URLs to protect submitted user data.",
+    "sensitive_form_over_http": "Never transmit sensitive form inputs (passwords, credit cards) over unencrypted HTTP.",
+    "missing_hsts": "Implement a Strict-Transport-Security (HSTS) HTTP response header.",
+    "missing_content_security_policy": "Configure a Content-Security-Policy (CSP) header to safeguard against cross-site scripting.",
+    "missing_x_content_type_options": "Add 'X-Content-Type-Options: nosniff' header to prevent MIME-type sniffing.",
+    "missing_x_frame_options": "Set 'X-Frame-Options: DENY' or 'SAMEORIGIN' to protect visitors from clickjacking attacks.",
+    "missing_referrer_policy": "Define a Referrer-Policy header (such as 'strict-origin-when-cross-origin') to protect user privacy.",
+    "missing_permissions_policy": "Specify a Permissions-Policy header to control access to sensitive browser features like geolocation.",
+    "insecure_external_resource": "Load external stylesheets, fonts, and scripts exclusively over HTTPS.",
+    "external_link_target_blank_noopener": "Add rel='noopener' to target='_blank' links to prevent tab-nabbing vulnerabilities.",
+    "external_link_target_blank_noreferrer": "Include rel='noreferrer' if you wish to prevent leaking referrer data to external sites.",
+
+    # International SEO
+    "missing_hreflang": "Add hreflang annotations to indicate alternate language and regional versions of content.",
+    "invalid_hreflang": "Use valid ISO 639-1 language codes and optional ISO 3166-1 region codes in hreflang tags.",
+    "hreflang_missing_return_link": "Ensure alternate pages reciprocate hreflang annotations back to the source page.",
+    "hreflang_target_not_crawled": "Verify that all URLs targeted by hreflang annotations are reachable and crawlable.",
+    "hreflang_noncanonical_target": "Point hreflang annotations only to canonical URLs rather than redirected or duplicate versions.",
+    "hreflang_missing_self_reference": "Include a self-referencing hreflang tag matching the current page's own URL and language code.",
+    "hreflang_missing_x_default": "Provide an hreflang='x-default' fallback link for international visitors without language matches.",
+    "hreflang_canonical_conflict": "Ensure the canonical URL matches the hreflang URL assigned to the same language version.",
+    "duplicate_hreflang_language": "Remove duplicate hreflang tags targeting the same language/region code with conflicting URLs.",
+    "hreflang_http_url": "Ensure hreflang links use secure HTTPS URLs rather than HTTP.",
+
+    # Social Sharing
+    "missing_og_title": "Add an og:title meta tag to customize how the page title appears on social media feeds.",
+    "missing_og_description": "Add an og:description meta tag with an engaging 60–200 character preview of page content.",
+    "missing_og_image": "Add an og:image meta tag referencing a high-resolution image (minimum 1200x630px).",
+    "missing_og_url": "Provide an absolute og:url meta tag corresponding to the page's canonical URL.",
+    "missing_og_type": "Specify og:type (e.g., 'website' or 'article') to identify the resource format.",
+    "invalid_og_url": "Ensure og:url is a valid, absolute HTTP or HTTPS URL.",
+    "og_url_canonical_conflict": "Align og:url with the canonical link URL to ensure consistent social tracking and indexing.",
+    "og_image_invalid_url": "Use an absolute, valid URL for og:image so social platforms can fetch preview graphics.",
+    "duplicate_og_tags": "Remove duplicate Open Graph properties with conflicting content values.",
+    "empty_og_metadata": "Provide non-empty values for all declared Open Graph meta tags.",
+    "short_og_title": "Expand og:title to at least 15 characters to provide clear social preview context.",
+    "long_og_title": "Keep og:title under 90 characters to avoid truncation in social media feeds.",
+    "short_og_description": "Expand og:description to at least 50 characters for an informative social preview snippet.",
+    "long_og_description": "Keep og:description under 300 characters to fit within social platform snippet cards.",
+    "social_image_missing_alt": "Add an og:image:alt tag describing the social preview image for accessibility.",
+    "missing_twitter_card": "Add <meta name='twitter:card' content='summary_large_image'> to format Twitter/X link previews.",
+    "missing_twitter_title": "Add a twitter:title meta tag or rely on fallback to og:title.",
+    "missing_twitter_description": "Add a twitter:description meta tag or rely on fallback to og:description.",
+    "missing_twitter_image": "Add a twitter:image meta tag or rely on fallback to og:image.",
+    "invalid_twitter_card": "Set twitter:card to a supported type ('summary' or 'summary_large_image').",
+
+    # Structured Data
+    "missing_structured_data": "Implement Schema.org structured data (JSON-LD) to make your pages eligible for Google rich results.",
+    "invalid_json_ld": "Fix JSON syntax errors in <script type='application/ld+json'> tags.",
+    "missing_required_schema_field": "Add recommended or required Schema.org properties (e.g., headline, author, image) to complete markup.",
+    "duplicate_schema_type": "Consolidate duplicate structured data declarations of the same schema type on the same page.",
+}
+
+
+def get_recommendation_for_issue(issue_type: str) -> str:
+    """Return an actionable recommendation for an issue type."""
+    return ISSUE_RECOMMENDATIONS.get(
+        issue_type,
+        "Review and resolve affected URLs according to SEO best practices.",
+    )
+
+
+def _get_audited_urls_for_category(
+    category: str,
+    results: list[dict[str, Any]],
+) -> set[str]:
+    """Determine the URLs of pages that were audited for a specific category."""
+    all_urls = {p.get("url") for p in results if p.get("url")}
+    html_urls = {
+        p.get("url")
+        for p in results
+        if p.get("url")
+        and p.get("status_code", 200) < 400
+        and (p.get("content_type") is None or is_html_content(p.get("content_type")))
+        and p.get("error") is None
+    }
+
+    if category in (
+        CATEGORY_TECHNICAL_SEO,
+        CATEGORY_CONTENT_QUALITY,
+        CATEGORY_ACCESSIBILITY,
+        CATEGORY_SOCIAL_SHARING,
+        CATEGORY_STRUCTURED_DATA,
+    ):
+        return html_urls if html_urls else all_urls
+
+    elif category == CATEGORY_PERFORMANCE:
+        perf_urls = {
+            p.get("url")
+            for p in results
+            if p.get("url")
+            and (p.get("response_time_ms") is not None or p.get("page_size_bytes") is not None)
+        }
+        return perf_urls if perf_urls else all_urls
+
+    elif category == CATEGORY_INTERNATIONAL_SEO:
+        hreflang_urls = {
+            p.get("url")
+            for p in results
+            if p.get("url")
+            and (
+                p.get("hreflang_count", 0) > 0
+                or any(
+                    i.get("type") in HREFLANG_ISSUE_TYPES
+                    for i in p.get("seo_issues", [])
+                )
+            )
+        }
+        return hreflang_urls
+
+    elif category in (CATEGORY_CRAWLABILITY, CATEGORY_SECURITY):
+        return all_urls
+
+    return all_urls
+
+
+def calculate_site_health_summary(
+    results: list[dict[str, Any]],
+    extra_issues: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Calculate comprehensive Site Health Score and SEO Audit Overview.
+
+    Scoring formula:
+      - Each category score begins at 100.
+      - For each page audited within that category, deductions are applied:
+          * 15 points per unique error
+          * 5 points per unique warning
+          * 1 point per unique notice/info
+        Page scores are clamped to a minimum of 0.
+      - Category score is the average of audited page scores minus any site-wide finding penalties.
+      - Overall Site Health Score is the average of all active/audited category scores (0–100).
+      - If no pages were audited for a category and no issues were found, it does not penalize the site.
+    """
+    # Collect all findings across pages and extra_issues
+    all_raw_issues: list[dict[str, Any]] = []
+    for p in results:
+        for i in p.get("seo_issues", []):
+            if isinstance(i, dict) and "type" in i:
+                all_raw_issues.append(i)
+    if extra_issues:
+        for i in extra_issues:
+            if isinstance(i, dict) and "type" in i:
+                all_raw_issues.append(i)
+
+    # Deduplicate issues by (type, url, message/target) to avoid counting duplicates multiple times
+    seen_issue_keys: set[tuple[str, str, str]] = set()
+    deduped_issues: list[dict[str, Any]] = []
+    for issue in all_raw_issues:
+        itype = str(issue.get("type", ""))
+        iurl = str(issue.get("url", ""))
+        imsg = str(issue.get("message") or issue.get("image_url") or issue.get("target_url") or "")
+        key = (itype, iurl, imsg)
+        if key not in seen_issue_keys:
+            seen_issue_keys.add(key)
+            deduped_issues.append(issue)
+
+    categories: dict[str, dict[str, Any]] = {}
+
+    for c in ALL_CATEGORIES:
+        audited_urls = _get_audited_urls_for_category(c, results)
+        cat_issues = [
+            i
+            for i in deduped_issues
+            if ISSUE_CATEGORY_MAP.get(i.get("type", ""), CATEGORY_TECHNICAL_SEO) == c
+        ]
+
+        cat_severity_counts = {
+            "error": sum(1 for i in cat_issues if i.get("severity") == "error"),
+            "warning": sum(1 for i in cat_issues if i.get("severity") == "warning"),
+            "info": sum(1 for i in cat_issues if i.get("severity") == "info"),
+        }
+
+        # Group issues by page url
+        issues_by_page: dict[str, list[dict[str, Any]]] = {url: [] for url in audited_urls}
+        site_wide_issues: list[dict[str, Any]] = []
+
+        for issue in cat_issues:
+            iurl = issue.get("url")
+            if iurl in issues_by_page:
+                issues_by_page[iurl].append(issue)
+            else:
+                site_wide_issues.append(issue)
+
+        # Compute page scores
+        if audited_urls:
+            page_scores: list[float] = []
+            for url, p_issues in issues_by_page.items():
+                seen_types_on_page: set[str] = set()
+                p_penalties = 0.0
+                for pi in p_issues:
+                    ptype = pi.get("type", "")
+                    if ptype not in seen_types_on_page:
+                        seen_types_on_page.add(ptype)
+                        p_penalties += SEVERITY_WEIGHTS.get(pi.get("severity", "warning"), 5.0)
+                page_scores.append(max(0.0, 100.0 - p_penalties))
+
+            avg_page_score = sum(page_scores) / len(page_scores)
+            site_wide_penalty = sum(
+                SEVERITY_WEIGHTS.get(i.get("severity", "warning"), 5.0)
+                for i in site_wide_issues
+            )
+            cat_score = max(0.0, min(100.0, avg_page_score - site_wide_penalty))
+        else:
+            if site_wide_issues:
+                site_wide_penalty = sum(
+                    SEVERITY_WEIGHTS.get(i.get("severity", "warning"), 5.0)
+                    for i in site_wide_issues
+                )
+                cat_score = max(0.0, min(100.0, 100.0 - site_wide_penalty))
+            else:
+                cat_score = 100.0
+
+        cat_score = round(cat_score, 1)
+
+        if cat_score >= 90.0:
+            status = "healthy"
+        elif cat_score >= 70.0:
+            status = "warning"
+        else:
+            status = "critical"
+
+        categories[c] = {
+            "name": CATEGORY_NAMES.get(c, c),
+            "score": cat_score,
+            "pages_audited_count": len(audited_urls),
+            "total_findings": len(cat_issues),
+            "severity_counts": cat_severity_counts,
+            "status": status,
+        }
+
+    # Determine overall site health score across active categories
+    active_categories = [
+        c
+        for c in ALL_CATEGORIES
+        if categories[c]["pages_audited_count"] > 0
+        or categories[c]["total_findings"] > 0
+    ]
+
+    if active_categories:
+        site_health_score = round(
+            sum(categories[c]["score"] for c in active_categories) / len(active_categories),
+            1,
+        )
+    else:
+        site_health_score = 100.0
+
+    if site_health_score >= 90.0:
+        health_rating = "Excellent"
+    elif site_health_score >= 70.0:
+        health_rating = "Good"
+    elif site_health_score >= 50.0:
+        health_rating = "Fair"
+    else:
+        health_rating = "Poor"
+
+    # Prioritized issues grouped by type
+    issues_by_type: dict[str, list[dict[str, Any]]] = {}
+    for issue in deduped_issues:
+        itype = issue.get("type", "unknown")
+        issues_by_type.setdefault(itype, []).append(issue)
+
+    prioritized_issues: list[dict[str, Any]] = []
+    severity_order = {"error": 0, "warning": 1, "info": 2}
+
+    for itype, issue_list in issues_by_type.items():
+        sample = issue_list[0]
+        severity = sample.get("severity", "warning")
+        category = ISSUE_CATEGORY_MAP.get(itype, CATEGORY_TECHNICAL_SEO)
+        affected_urls = sorted({i.get("url") for i in issue_list if i.get("url")})
+        prioritized_issues.append(
+            {
+                "issue_type": itype,
+                "category": category,
+                "category_name": CATEGORY_NAMES.get(category, category),
+                "severity": severity,
+                "affected_pages_count": len(affected_urls),
+                "total_occurrences": len(issue_list),
+                "sample_message": sample.get("message", ""),
+                "recommendation": get_recommendation_for_issue(itype),
+                "affected_urls": affected_urls[:10],
+            }
+        )
+
+    prioritized_issues.sort(
+        key=lambda x: (
+            severity_order.get(x["severity"], 1),
+            -x["affected_pages_count"],
+            -x["total_occurrences"],
+            x["issue_type"],
+        )
+    )
+
+    return {
+        "site_health_score": site_health_score,
+        "health_rating": health_rating,
+        "total_pages_audited": len({p.get("url") for p in results if p.get("url")}),
+        "total_findings": len(deduped_issues),
+        "severity_counts": {
+            "error": sum(1 for i in deduped_issues if i.get("severity") == "error"),
+            "warning": sum(1 for i in deduped_issues if i.get("severity") == "warning"),
+            "info": sum(1 for i in deduped_issues if i.get("severity") == "info"),
+        },
+        "categories": categories,
+        "prioritized_issues": prioritized_issues,
+        "top_priority_issues": prioritized_issues[:5],
+        "scoring_methodology": {
+            "formula": (
+                "For each category, audited page scores start at 100 and deduct 15 points per unique error, "
+                "5 points per unique warning, and 1 point per unique notice on that page (min 0). "
+                "Category score is the average of audited page scores minus site-wide finding penalties. "
+                "Overall Site Health Score is the average of all active/audited category scores (0–100)."
+            ),
+            "weights": SEVERITY_WEIGHTS,
+        },
+    }
+
+
 def crawl_website(
     start_url: str,
     max_pages: int = 10,

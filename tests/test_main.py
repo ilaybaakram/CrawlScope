@@ -300,6 +300,13 @@ class FastAPIEndpointTests(unittest.TestCase):
                 },
             },
         )
+        self.assertIn("site_health_summary", data)
+        health = data["site_health_summary"]
+        self.assertIn("site_health_score", health)
+        self.assertIn("health_rating", health)
+        self.assertIn("categories", health)
+        self.assertIn("prioritized_issues", health)
+        self.assertEqual(len(health["categories"]), 9)
         self.assertEqual(data["pages"], [SAMPLE_PAGE])
         self.assertEqual(
             [issue["type"] for issue in data["pages"][0]["seo_issues"]],
