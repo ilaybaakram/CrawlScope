@@ -3562,6 +3562,576 @@ def summarize_sitemap_coverage(
     }
 
 
+SECURITY_ISSUE_TYPES = {
+    "http_page",
+    "http_internal_link",
+    "mixed_content",
+    "insecure_form_action",
+    "missing_hsts",
+    "missing_content_security_policy",
+    "missing_x_content_type_options",
+    "missing_x_frame_options",
+    "missing_referrer_policy",
+    "missing_permissions_policy",
+    "insecure_external_resource",
+    "sensitive_form_over_http",
+}
+
+MISSING_SECURITY_HEADER_ISSUE_TYPES = {
+    "missing_hsts",
+    "missing_content_security_policy",
+    "missing_x_content_type_options",
+    "missing_x_frame_options",
+    "missing_referrer_policy",
+    "missing_permissions_policy",
+}
+
+_SUBRESOURCE_LINK_RELS = {
+    "stylesheet",
+    "preload",
+    "modulepreload",
+    "icon",
+    "shortcut",
+    "apple-touch-icon",
+    "manifest",
+    "prefetch",
+}
+
+_SENSITIVE_AUTOCOMPLETE_TOKENS = {
+    "current-password",
+    "new-password",
+    "cc-number",
+    "cc-csc",
+    "cc-exp",
+    "cc-exp-month",
+    "cc-exp-year",
+    "one-time-code",
+}
+
+_SENSITIVE_FIELD_TOKENS = {
+    "password",
+    "passwd",
+    "passcode",
+    "pin",
+    "cvv",
+    "cvc",
+    "csc",
+    "ssn",
+    "secret",
+    "token",
+    "cardnumber",
+    "creditcard",
+}
+
+_SENSITIVE_FIELD_SUBSTRINGS = (
+    "password",
+    "passwd",
+    "passcode",
+    "credit_card",
+    "credit-card",
+    "card_number",
+    "card-number",
+)
+
+
+def _normalize_response_headers(
+    response_headers: Any,
+) -> dict[str, list[str]]:
+    """Normalize HTTP response header names case-insensitively to non-empty value lists."""
+    normalized: dict[str, list[str]] = {}
+    if response_headers is None:
+        return normalized
+
+    items: list[tuple[Any, Any]] = []
+    if hasattr(response_headers, "multi_items"):
+        items = list(response_headers.multi_items())
+    elif isinstance(response_headers, dict):
+        for k, v in response_headers.items():
+            if isinstance(v, (list, tuple)):
+                for sub_v in v:
+                    items.append((k, sub_v))
+            else:
+                items.append((k, v))
+    elif isinstance(response_headers, (list, tuple)):
+        for entry in response_headers:
+            if isinstance(entry, (list, tuple)) and len(entry) == 2:
+                items.append((entry[0], entry[1]))
+
+    for key, val in items:
+        if key is None or val is None:
+            continue
+        k_lower = str(key).strip().lower()
+        v_clean = str(val).strip()
+        if k_lower and v_clean:
+            normalized.setdefault(k_lower, []).append(v_clean)
+
+    return normalized
+
+
+def _has_csp_frame_ancestors(norm_headers: dict[str, list[str]]) -> bool:
+    """Return True if any Content-Security-Policy header declares a valid frame-ancestors directive."""
+    csp_values = norm_headers.get("content-security-policy", [])
+    for csp_val in csp_values:
+        for raw_directive in csp_val.split(";"):
+            parts = raw_directive.strip().split()
+            if len(parts) >= 2 and parts[0].lower() == "frame-ancestors":
+                return True
+    return False
+
+
+def _extract_srcset_urls(srcset_value: str) -> list[str]:
+    """Extract candidate URLs from an HTML srcset attribute."""
+    urls: list[str] = []
+    for part in srcset_value.split(","):
+        tokens = part.strip().split()
+        if tokens and tokens[0]:
+            urls.append(tokens[0])
+    return urls
+
+
+def _extract_subresource_urls(soup: BeautifulSoup) -> list[str]:
+    """Extract embedded subresource URLs (scripts, stylesheets, images, iframes, media) from HTML."""
+    raw_urls: list[str] = []
+
+    for script_tag in soup.find_all("script"):
+        src = script_tag.get("src")
+        if isinstance(src, str) and src.strip():
+            raw_urls.append(src.strip())
+
+    for link_tag in soup.find_all("link"):
+        href = link_tag.get("href")
+        if not isinstance(href, str) or not href.strip():
+            continue
+        rel_tokens = _extract_rel_tokens(link_tag)
+        if rel_tokens & _SUBRESOURCE_LINK_RELS:
+            raw_urls.append(href.strip())
+
+    for img_tag in soup.find_all("img"):
+        src = img_tag.get("src")
+        if isinstance(src, str) and src.strip():
+            raw_urls.append(src.strip())
+        srcset = img_tag.get("srcset")
+        if isinstance(srcset, str) and srcset.strip():
+            raw_urls.extend(_extract_srcset_urls(srcset))
+
+    for tag_name in ("iframe", "audio", "video", "source", "embed"):
+        for media_tag in soup.find_all(tag_name):
+            src = media_tag.get("src")
+            if isinstance(src, str) and src.strip():
+                raw_urls.append(src.strip())
+            if tag_name == "video":
+                poster = media_tag.get("poster")
+                if isinstance(poster, str) and poster.strip():
+                    raw_urls.append(poster.strip())
+            if tag_name == "source":
+                srcset = media_tag.get("srcset")
+                if isinstance(srcset, str) and srcset.strip():
+                    raw_urls.extend(_extract_srcset_urls(srcset))
+
+    for obj_tag in soup.find_all("object"):
+        data_attr = obj_tag.get("data")
+        if isinstance(data_attr, str) and data_attr.strip():
+            raw_urls.append(data_attr.strip())
+
+    return raw_urls
+
+
+def _tokenize_identifier(text: str) -> set[str]:
+    """Split an attribute identifier into lowercase alphanumeric tokens."""
+    cleaned = []
+    for ch in text.lower():
+        cleaned.append(ch if ch.isalnum() else " ")
+    return set("".join(cleaned).split())
+
+
+def _is_sensitive_form(form: Any) -> bool:
+    """Return True if a <form> appears to collect passwords, credentials, or payment details."""
+    for input_tag in form.find_all("input"):
+        input_type = (input_tag.get("type") or "text").strip().lower()
+        if input_type in ("hidden", "submit", "button", "reset", "image"):
+            continue
+        if input_type == "password":
+            return True
+
+        autocomplete = (input_tag.get("autocomplete") or "").strip().lower()
+        if autocomplete:
+            ac_tokens = set(autocomplete.split())
+            if ac_tokens & _SENSITIVE_AUTOCOMPLETE_TOKENS:
+                return True
+
+        for attr_name in ("name", "id"):
+            raw_val = (input_tag.get(attr_name) or "").strip().lower()
+            if not raw_val:
+                continue
+            if any(sub in raw_val for sub in _SENSITIVE_FIELD_SUBSTRINGS):
+                return True
+            if _tokenize_identifier(raw_val) & _SENSITIVE_FIELD_TOKENS:
+                return True
+
+    return False
+
+
+def detect_security_seo_issues(
+    url: str,
+    soup: BeautifulSoup | None,
+    content_type: str | None,
+    response_headers: Any = None,
+    target_hostname: str | None = None,
+    https_expected: bool = False,
+) -> list[dict[str, Any]]:
+    """Run passive Website Security & HTTPS audit checks on a crawled HTML page."""
+    if not is_html_content(content_type) or soup is None:
+        return []
+
+    issues: list[dict[str, Any]] = []
+    parsed_page = urlparse(url)
+    page_scheme = (parsed_page.scheme or "").lower()
+    is_https_page = page_scheme == "https"
+    is_http_page = page_scheme == "http"
+    page_host_fold = (
+        target_hostname or parsed_page.hostname or ""
+    ).casefold()
+
+    norm_headers = _normalize_response_headers(response_headers)
+
+    # 1. http_page: Crawled page is served over HTTP instead of HTTPS
+    if is_http_page:
+        issues.append(
+            {
+                "type": "http_page",
+                "severity": "warning",
+                "message": (
+                    f"Page is served over unencrypted HTTP ({url}); serve pages "
+                    f"over HTTPS and redirect HTTP traffic to HTTPS to protect transport security."
+                ),
+                "url": url,
+            }
+        )
+
+    # 2. http_internal_link: Internal link points to an HTTP URL when HTTPS is available or expected
+    http_internal_links: list[str] = []
+    seen_http_internal: set[str] = set()
+    for a_tag in soup.find_all("a"):
+        raw_href = a_tag.get("href")
+        if not isinstance(raw_href, str):
+            continue
+        stripped_href = raw_href.strip()
+        if not stripped_href or stripped_href.startswith(
+            ("#", "mailto:", "tel:", "javascript:", "data:")
+        ):
+            continue
+
+        is_explicit_http = stripped_href.lower().startswith("http://")
+        if not (is_https_page or https_expected or is_explicit_http):
+            continue
+
+        abs_href, _ = urldefrag(urljoin(url, stripped_href))
+        parsed_href = urlparse(abs_href)
+        if (
+            parsed_href.scheme.lower() == "http"
+            and (parsed_href.hostname or "").casefold() == page_host_fold
+        ):
+            norm_href = _normalize_internal_url(abs_href)
+            if norm_href not in seen_http_internal:
+                seen_http_internal.add(norm_href)
+                http_internal_links.append(abs_href)
+
+    if http_internal_links:
+        issues.append(
+            {
+                "type": "http_internal_link",
+                "severity": "warning",
+                "message": (
+                    f"Page contains {len(http_internal_links)} internal link(s) pointing "
+                    f"to HTTP URL(s) ({', '.join(http_internal_links[:5])}); update "
+                    f"internal links to HTTPS so users and crawlers avoid unnecessary insecure hops."
+                ),
+                "url": url,
+                "insecure_urls": list(http_internal_links),
+            }
+        )
+
+    # 3. mixed_content & 11. insecure_external_resource (only on HTTPS pages)
+    if is_https_page:
+        mixed_content_urls: list[str] = []
+        seen_mixed: set[str] = set()
+        insecure_external_urls: list[str] = []
+        seen_external: set[str] = set()
+
+        for raw_res in _extract_subresource_urls(soup):
+            if raw_res.startswith(("#", "data:", "blob:", "javascript:", "about:")):
+                continue
+            abs_res, _ = urldefrag(urljoin(url, raw_res))
+            parsed_res = urlparse(abs_res)
+            if parsed_res.scheme.lower() != "http" or not parsed_res.hostname:
+                continue
+
+            if abs_res not in seen_mixed:
+                seen_mixed.add(abs_res)
+                mixed_content_urls.append(abs_res)
+
+            res_host_fold = (parsed_res.hostname or "").casefold()
+            if res_host_fold != page_host_fold and abs_res not in seen_external:
+                seen_external.add(abs_res)
+                insecure_external_urls.append(abs_res)
+
+        if mixed_content_urls:
+            issues.append(
+                {
+                    "type": "mixed_content",
+                    "severity": "warning",
+                    "message": (
+                        f"HTTPS page references {len(mixed_content_urls)} insecure HTTP "
+                        f"subresource(s) ({', '.join(mixed_content_urls[:5])}); update all "
+                        f"embedded images, scripts, stylesheets, and iframes to HTTPS."
+                    ),
+                    "url": url,
+                    "insecure_urls": list(mixed_content_urls),
+                }
+            )
+
+        if insecure_external_urls:
+            issues.append(
+                {
+                    "type": "insecure_external_resource",
+                    "severity": "warning",
+                    "message": (
+                        f"HTTPS page loads {len(insecure_external_urls)} external "
+                        f"resource(s) over HTTP ({', '.join(insecure_external_urls[:5])}); "
+                        f"load third-party resources over HTTPS to prevent tampering."
+                    ),
+                    "url": url,
+                    "insecure_urls": list(insecure_external_urls),
+                }
+            )
+
+    # 4. insecure_form_action & 12. sensitive_form_over_http
+    insecure_form_actions: list[str] = []
+    seen_insecure_actions: set[str] = set()
+    sensitive_http_actions: list[str] = []
+    seen_sensitive_actions: set[str] = set()
+
+    for form_tag in soup.find_all("form"):
+        raw_action = (form_tag.get("action") or "").strip()
+        if raw_action.lower().startswith("javascript:"):
+            continue
+        if raw_action:
+            resolved_action, _ = urldefrag(urljoin(url, raw_action))
+        else:
+            resolved_action = url
+
+        parsed_action = urlparse(resolved_action)
+        action_is_http = parsed_action.scheme.lower() == "http"
+
+        if is_https_page and action_is_http:
+            if resolved_action not in seen_insecure_actions:
+                seen_insecure_actions.add(resolved_action)
+                insecure_form_actions.append(resolved_action)
+
+        if action_is_http and _is_sensitive_form(form_tag):
+            if resolved_action not in seen_sensitive_actions:
+                seen_sensitive_actions.add(resolved_action)
+                sensitive_http_actions.append(resolved_action)
+
+    if insecure_form_actions:
+        issues.append(
+            {
+                "type": "insecure_form_action",
+                "severity": "warning",
+                "message": (
+                    f"HTTPS page contains a form submitting data to an insecure HTTP "
+                    f"endpoint ({', '.join(insecure_form_actions)}); use an HTTPS form "
+                    f"action URL so submitted data is encrypted in transit."
+                ),
+                "url": url,
+                "form_action": insecure_form_actions[0],
+                "insecure_urls": list(insecure_form_actions),
+            }
+        )
+
+    if sensitive_http_actions:
+        issues.append(
+            {
+                "type": "sensitive_form_over_http",
+                "severity": "warning",
+                "message": (
+                    f"Form collecting credentials or sensitive input submits over "
+                    f"unencrypted HTTP ({', '.join(sensitive_http_actions)}); serve "
+                    f"both the page and the form submission endpoint over HTTPS."
+                ),
+                "url": url,
+                "form_action": sensitive_http_actions[0],
+                "insecure_urls": list(sensitive_http_actions),
+            }
+        )
+
+    # 5. missing_hsts (HTTPS responses only)
+    if is_https_page and "strict-transport-security" not in norm_headers:
+        issues.append(
+            {
+                "type": "missing_hsts",
+                "severity": "warning",
+                "message": (
+                    "HTTPS response lacks a Strict-Transport-Security (HSTS) header; "
+                    "add 'Strict-Transport-Security: max-age=31536000; includeSubDomains' "
+                    "so browsers enforce HTTPS connections."
+                ),
+                "url": url,
+                "missing_header": "Strict-Transport-Security",
+            }
+        )
+
+    # 6. missing_content_security_policy
+    if "content-security-policy" not in norm_headers:
+        issues.append(
+            {
+                "type": "missing_content_security_policy",
+                "severity": "warning",
+                "message": (
+                    "Response lacks a Content-Security-Policy header; configure a "
+                    "Content-Security-Policy header to restrict permitted script and "
+                    "resource origins."
+                ),
+                "url": url,
+                "missing_header": "Content-Security-Policy",
+            }
+        )
+
+    # 7. missing_x_content_type_options
+    if "x-content-type-options" not in norm_headers:
+        issues.append(
+            {
+                "type": "missing_x_content_type_options",
+                "severity": "warning",
+                "message": (
+                    "Response lacks an X-Content-Type-Options header; add "
+                    "'X-Content-Type-Options: nosniff' to prevent MIME-type sniffing."
+                ),
+                "url": url,
+                "missing_header": "X-Content-Type-Options",
+            }
+        )
+
+    # 8. missing_x_frame_options (satisfied by X-Frame-Options or CSP frame-ancestors)
+    if (
+        "x-frame-options" not in norm_headers
+        and not _has_csp_frame_ancestors(norm_headers)
+    ):
+        issues.append(
+            {
+                "type": "missing_x_frame_options",
+                "severity": "warning",
+                "message": (
+                    "Response lacks X-Frame-Options and an equivalent CSP frame-ancestors "
+                    "directive; add 'X-Frame-Options: SAMEORIGIN' or a CSP 'frame-ancestors' "
+                    "policy to control framing."
+                ),
+                "url": url,
+                "missing_header": "X-Frame-Options",
+            }
+        )
+
+    # 9. missing_referrer_policy
+    if "referrer-policy" not in norm_headers:
+        issues.append(
+            {
+                "type": "missing_referrer_policy",
+                "severity": "info",
+                "message": (
+                    "Response lacks a Referrer-Policy header; add "
+                    "'Referrer-Policy: strict-origin-when-cross-origin' to control "
+                    "referrer data sent to external sites."
+                ),
+                "url": url,
+                "missing_header": "Referrer-Policy",
+            }
+        )
+
+    # 10. missing_permissions_policy
+    if "permissions-policy" not in norm_headers:
+        issues.append(
+            {
+                "type": "missing_permissions_policy",
+                "severity": "info",
+                "message": (
+                    "Response lacks a Permissions-Policy header; add a Permissions-Policy "
+                    "header to explicitly restrict powerful browser features."
+                ),
+                "url": url,
+                "missing_header": "Permissions-Policy",
+            }
+        )
+
+    return issues
+
+
+def summarize_security_audit(
+    results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Calculate security & HTTPS summary statistics from crawled page results."""
+    crawled_pages = [
+        page for page in results if page.get("error") is None
+    ]
+    https_pages_count = sum(
+        1
+        for p in crawled_pages
+        if p.get("is_https") is True
+        or (
+            p.get("is_https") is None
+            and urlparse(p.get("url", "")).scheme.lower() == "https"
+        )
+    )
+    http_pages_count = sum(
+        1
+        for p in crawled_pages
+        if p.get("is_https") is False
+        or (
+            p.get("is_https") is None
+            and urlparse(p.get("url", "")).scheme.lower() == "http"
+        )
+    )
+
+    mixed_content_pages_count = 0
+    missing_security_headers_pages_count = 0
+    total_security_issues = 0
+    severity_counts: dict[str, int] = {
+        "error": 0,
+        "warning": 0,
+        "info": 0,
+    }
+
+    for page in results:
+        issues = page.get("seo_issues", [])
+        has_mixed = False
+        has_missing_header = False
+        for issue in issues:
+            issue_type = issue.get("type")
+            if issue_type in SECURITY_ISSUE_TYPES:
+                total_security_issues += 1
+                sev = (issue.get("severity") or "warning").lower()
+                if sev in severity_counts:
+                    severity_counts[sev] += 1
+                else:
+                    severity_counts[sev] = 1
+                if issue_type == "mixed_content":
+                    has_mixed = True
+                if issue_type in MISSING_SECURITY_HEADER_ISSUE_TYPES:
+                    has_missing_header = True
+        if has_mixed:
+            mixed_content_pages_count += 1
+        if has_missing_header:
+            missing_security_headers_pages_count += 1
+
+    return {
+        "https_pages_count": https_pages_count,
+        "http_pages_count": http_pages_count,
+        "mixed_content_pages_count": mixed_content_pages_count,
+        "missing_security_headers_pages_count": missing_security_headers_pages_count,
+        "total_security_issues": total_security_issues,
+        "severity_counts": severity_counts,
+    }
+
+
 def crawl_website(
     start_url: str,
     max_pages: int = 10,
@@ -3716,6 +4286,7 @@ def crawl_website(
                     "content_type": content_type,
                     "response_time_ms": response_time_ms,
                     "page_size_bytes": page_size_bytes,
+                    "is_https": urlparse(current_url).scheme.lower() == "https",
                     "in_sitemap": False,
                     "seo_issues": seo_issues,
                     "error": None,
@@ -3935,6 +4506,15 @@ def crawl_website(
                     content_type=content_type,
                 )
             )
+            seo_issues.extend(
+                detect_security_seo_issues(
+                    url=current_url,
+                    soup=soup,
+                    content_type=content_type,
+                    response_headers=response.headers,
+                    target_hostname=target_hostname,
+                )
+            )
 
         except httpx.RequestError as error:
             results.append(
@@ -3951,6 +4531,7 @@ def crawl_website(
                     "content_type": None,
                     "response_time_ms": None,
                     "page_size_bytes": None,
+                    "is_https": urlparse(current_url).scheme.lower() == "https",
                     "in_sitemap": False,
                     "seo_issues": [],
                     "error": str(error),
@@ -3976,6 +4557,7 @@ def crawl_website(
                     "content_type": error.response.headers.get("content-type"),
                     "response_time_ms": response_time_ms,
                     "page_size_bytes": page_size_bytes,
+                    "is_https": urlparse(current_url).scheme.lower() == "https",
                     "in_sitemap": False,
                     "seo_issues": [],
                     "error": str(error),

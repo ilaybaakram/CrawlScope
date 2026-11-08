@@ -17,6 +17,7 @@ SAMPLE_PAGES = [
         "total_links": 12,
         "incoming_internal_links": 2,
         "outgoing_internal_links": 8,
+        "is_https": True,
         "in_sitemap": True,
         "content_type": "text/html; charset=utf-8",
         "response_time_ms": 140.25,
@@ -34,6 +35,7 @@ SAMPLE_PAGES = [
         "total_links": 0,
         "incoming_internal_links": 0,
         "outgoing_internal_links": 0,
+        "is_https": True,
         "in_sitemap": False,
         "content_type": "text/html",
         "response_time_ms": 85.0,
@@ -51,6 +53,7 @@ SAMPLE_PAGES = [
         "total_links": 3,
         "incoming_internal_links": 1,
         "outgoing_internal_links": 2,
+        "is_https": True,
         "in_sitemap": False,
         "content_type": "text/html",
         "response_time_ms": 2450.5,
@@ -172,6 +175,13 @@ SAMPLE_PAGES = [
                 "message": "Crawled indexable HTML page is missing from the XML sitemap; add it so search engines can discover it reliably.",
                 "url": "https://example.com/café",
                 "sitemap_url": "https://example.com/sitemap.xml",
+            },
+            {
+                "type": "missing_hsts",
+                "severity": "warning",
+                "message": "HTTPS response lacks a Strict-Transport-Security (HSTS) header; add 'Strict-Transport-Security: max-age=31536000; includeSubDomains' so browsers enforce HTTPS connections.",
+                "url": "https://example.com/café",
+                "missing_header": "Strict-Transport-Security",
             },
         ],
         "error": None,
@@ -296,7 +306,7 @@ class PageExportTests(ExporterTestCase):
         self.assertIn("seo_issues", rows[0])
         self.assertEqual(json.loads(rows[0]["seo_issues"]), [])
         parsed_issues = json.loads(rows[2]["seo_issues"])
-        self.assertEqual(len(parsed_issues), 15)
+        self.assertEqual(len(parsed_issues), 16)
         self.assertEqual(parsed_issues[0]["type"], "missing_meta_description")
         self.assertEqual(parsed_issues[2]["type"], "duplicate_title")
         self.assertEqual(parsed_issues[3]["type"], "missing_image_alt")
@@ -349,6 +359,10 @@ class PageExportTests(ExporterTestCase):
         self.assertEqual(
             parsed_issues[14]["sitemap_url"],
             "https://example.com/sitemap.xml",
+        )
+        self.assertEqual(parsed_issues[15]["type"], "missing_hsts")
+        self.assertEqual(
+            parsed_issues[15]["missing_header"], "Strict-Transport-Security"
         )
 
         json_data = read_json(json_path)

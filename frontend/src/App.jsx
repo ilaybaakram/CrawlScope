@@ -17,10 +17,26 @@ const PAGE_FIELDS = [
   "content_type",
   "response_time_ms",
   "page_size_bytes",
+  "is_https",
   "in_sitemap",
   "seo_issues",
   "error",
 ];
+
+const SECURITY_ISSUE_TYPES = new Set([
+  "http_page",
+  "http_internal_link",
+  "mixed_content",
+  "insecure_form_action",
+  "missing_hsts",
+  "missing_content_security_policy",
+  "missing_x_content_type_options",
+  "missing_x_frame_options",
+  "missing_referrer_policy",
+  "missing_permissions_policy",
+  "insecure_external_resource",
+  "sensitive_form_over_http",
+]);
 
 const LINK_FIELDS = ["url", "found_on", "status_code", "result", "error"];
 
@@ -193,6 +209,48 @@ function App() {
     missing_from_sitemap_count: pages.filter((p) => p.in_sitemap === false)
       .length,
     sitemap_not_crawled_count: 0,
+  };
+  const securitySummary = crawlData?.security_summary || {
+    https_pages_count: pages.filter(
+      (p) =>
+        p.is_https === true ||
+        (p.is_https === undefined &&
+          typeof p.url === "string" &&
+          p.url.startsWith("https://"))
+    ).length,
+    http_pages_count: pages.filter(
+      (p) =>
+        p.is_https === false ||
+        (p.is_https === undefined &&
+          typeof p.url === "string" &&
+          p.url.startsWith("http://"))
+    ).length,
+    mixed_content_pages_count: pages.filter(
+      (p) =>
+        Array.isArray(p.seo_issues) &&
+        p.seo_issues.some((i) => i.type === "mixed_content")
+    ).length,
+    missing_security_headers_pages_count: pages.filter(
+      (p) =>
+        Array.isArray(p.seo_issues) &&
+        p.seo_issues.some(
+          (i) => typeof i.type === "string" && i.type.startsWith("missing_") && SECURITY_ISSUE_TYPES.has(i.type)
+        )
+    ).length,
+    total_security_issues: seoIssues.filter((i) =>
+      SECURITY_ISSUE_TYPES.has(i.type)
+    ).length,
+    severity_counts: {
+      error: seoIssues.filter(
+        (i) => SECURITY_ISSUE_TYPES.has(i.type) && i.severity === "error"
+      ).length,
+      warning: seoIssues.filter(
+        (i) => SECURITY_ISSUE_TYPES.has(i.type) && i.severity === "warning"
+      ).length,
+      info: seoIssues.filter(
+        (i) => SECURITY_ISSUE_TYPES.has(i.type) && i.severity === "info"
+      ).length,
+    },
   };
   const canDownload = Boolean(crawlData) && !isLoading;
 
@@ -375,6 +433,51 @@ function App() {
 
       <section className="card">
         <div className="section-header">
+          <h2>Security &amp; HTTPS Summary</h2>
+          <div className="seo-metrics">
+            <span className="metric-badge">
+              HTTPS Pages:{" "}
+              <strong>
+                {crawlData ? securitySummary.https_pages_count : 0}
+              </strong>
+            </span>
+            <span className="metric-badge">
+              HTTP Pages:{" "}
+              <strong>
+                {crawlData ? securitySummary.http_pages_count : 0}
+              </strong>
+            </span>
+            <span className="metric-badge">
+              Mixed Content Pages:{" "}
+              <strong>
+                {crawlData ? securitySummary.mixed_content_pages_count : 0}
+              </strong>
+            </span>
+            <span className="metric-badge">
+              Missing Security Headers:{" "}
+              <strong>
+                {crawlData
+                  ? securitySummary.missing_security_headers_pages_count
+                  : 0}
+              </strong>
+            </span>
+            <span className="metric-badge">
+              Security Findings:{" "}
+              <strong>
+                {crawlData ? securitySummary.total_security_issues : 0}
+              </strong>{" "}
+              (
+              {crawlData
+                ? `${securitySummary.severity_counts?.warning ?? 0} warning, ${securitySummary.severity_counts?.info ?? 0} info, ${securitySummary.severity_counts?.error ?? 0} error`
+                : "0 warning, 0 info, 0 error"}
+              )
+            </span>
+          </div>
+        </div>
+      </section>
+
+      <section className="card">
+        <div className="section-header">
           <h2>Download Crawl Results</h2>
           {!crawlData && (
             <span className="section-hint">
@@ -440,6 +543,8 @@ function App() {
                   <th>Links</th>
                   <th>Incoming Internal</th>
                   <th>Outgoing Internal</th>
+                  <th>HTTPS</th>
+                  <th>Security</th>
                   <th>In Sitemap</th>
                   <th>Response Time</th>
                   <th>Page Size</th>
@@ -476,6 +581,47 @@ function App() {
                     <td>{page.total_links ?? 0}</td>
                     <td>{page.incoming_internal_links ?? 0}</td>
                     <td>{page.outgoing_internal_links ?? 0}</td>
+                    <td>
+                      <span
+                        className={
+                          page.is_https ||
+                          (page.is_https === undefined &&
+                            typeof page.url === "string" &&
+                            page.url.startsWith("https://"))
+                            ? "status-pill status-ok"
+                            : "status-pill status-warning"
+                        }
+                      >
+                        {page.is_https ||
+                        (page.is_https === undefined &&
+                          typeof page.url === "string" &&
+                          page.url.startsWith("https://"))
+                          ? "HTTPS"
+                          : "HTTP"}
+                      </span>
+                    </td>
+                    <td>
+                      {(() => {
+                        const pageSecCount = Array.isArray(page.seo_issues)
+                          ? page.seo_issues.filter((i) =>
+                              SECURITY_ISSUE_TYPES.has(i.type)
+                            ).length
+                          : 0;
+                        return (
+                          <span
+                            className={
+                              pageSecCount === 0
+                                ? "status-pill status-ok"
+                                : "status-pill status-warning"
+                            }
+                          >
+                            {pageSecCount === 0
+                              ? "Secure"
+                              : `${pageSecCount} issue(s)`}
+                          </span>
+                        );
+                      })()}
+                    </td>
                     <td>
                       <span
                         className={
@@ -534,6 +680,8 @@ function App() {
                   <th>Depth</th>
                   <th>Incoming Internal</th>
                   <th>Outgoing Internal</th>
+                  <th>Missing Header</th>
+                  <th>Insecure / Form URL</th>
                   <th>Sitemap URL</th>
                   <th>Canonical URL</th>
                   <th>Robots Directive</th>
@@ -595,6 +743,23 @@ function App() {
                       issue.outgoing_internal_links !== null
                         ? issue.outgoing_internal_links
                         : "—"}
+                    </td>
+                    <td>
+                      {issue.missing_header ? (
+                        <code>{issue.missing_header}</code>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
+                    <td className="url-cell">
+                      {issue.form_action ? (
+                        <code>{issue.form_action}</code>
+                      ) : Array.isArray(issue.insecure_urls) &&
+                        issue.insecure_urls.length > 0 ? (
+                        <code>{issue.insecure_urls.join(", ")}</code>
+                      ) : (
+                        "—"
+                      )}
                     </td>
                     <td className="url-cell">
                       {issue.sitemap_url ? (

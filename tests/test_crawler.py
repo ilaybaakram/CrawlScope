@@ -33,6 +33,15 @@ START_HTML = """
 
 from xml.sax.saxutils import escape as xml_escape
 
+DEFAULT_SECURITY_HEADERS = {
+    "strict-transport-security": "max-age=31536000; includeSubDomains",
+    "content-security-policy": "default-src 'self'; frame-ancestors 'self'",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "SAMEORIGIN",
+    "referrer-policy": "strict-origin-when-cross-origin",
+    "permissions-policy": "geolocation=(), microphone=(), camera=()",
+}
+
 
 def make_response(
     method: str,
@@ -41,10 +50,16 @@ def make_response(
     text: str = "",
     content_type: str = "text/html",
     location: str | None = None,
+    include_security_headers: bool = True,
+    extra_headers: dict[str, str] | list[tuple[str, str]] | None = None,
 ) -> httpx.Response:
-    headers = {"content-type": content_type}
+    headers: dict[str, str] = {"content-type": content_type}
+    if include_security_headers:
+        headers.update(DEFAULT_SECURITY_HEADERS)
     if location is not None:
         headers["location"] = location
+    if isinstance(extra_headers, dict):
+        headers.update(extra_headers)
     return httpx.Response(
         status,
         text=text,
@@ -217,12 +232,7 @@ class SeoAuditTests(unittest.TestCase):
                 return make_response("GET", url, 200, ROBOTS_TXT)
             if url.endswith("/sitemap.xml"):
                 return make_sitemap_response(url, (START_URL,))
-            return httpx.Response(
-                200,
-                text=html,
-                headers={"content-type": content_type},
-                request=httpx.Request("GET", url),
-            )
+            return make_response("GET", url, 200, html, content_type=content_type)
 
         with patch("crawler.httpx.get", side_effect=fake_get), \
              patch("crawler.time.sleep"):
@@ -341,17 +351,19 @@ class DuplicateSeoAuditTests(unittest.TestCase):
                     sm_urls.append(page_two_url)
                 return make_sitemap_response(url, sm_urls)
             if url == START_URL:
-                return httpx.Response(
+                return make_response(
+                    "GET",
+                    url,
                     200,
-                    text=first_html,
-                    headers={"content-type": "text/html; charset=utf-8"},
-                    request=httpx.Request("GET", url),
+                    first_html,
+                    content_type="text/html; charset=utf-8",
                 )
-            return httpx.Response(
+            return make_response(
+                "GET",
+                url,
                 second_status,
-                text=second_html,
-                headers={"content-type": second_content_type},
-                request=httpx.Request("GET", url),
+                second_html,
+                content_type=second_content_type,
             )
 
         def fake_head(url, **_):
@@ -511,11 +523,8 @@ class ImageSeoAuditTests(unittest.TestCase):
                 return make_response("GET", url, 200, ROBOTS_TXT)
             if url.endswith("/sitemap.xml"):
                 return make_sitemap_response(url, (START_URL,))
-            return httpx.Response(
-                status_code,
-                text=html,
-                headers={"content-type": content_type},
-                request=httpx.Request("GET", url),
+            return make_response(
+                "GET", url, status_code, html, content_type=content_type
             )
 
         with patch("crawler.httpx.get", side_effect=fake_get), \
@@ -1222,11 +1231,8 @@ class CanonicalSeoAuditTests(unittest.TestCase):
                 ):
                     return make_sitemap_response(url, ())
                 return make_sitemap_response(url, (page_url,))
-            return httpx.Response(
-                200,
-                text=html,
-                headers={"content-type": content_type},
-                request=httpx.Request("GET", url),
+            return make_response(
+                "GET", url, 200, html, content_type=content_type
             )
 
         def fake_head(url, **_):
@@ -1421,7 +1427,10 @@ class RobotsSeoAuditTests(unittest.TestCase):
             f"{meta_tags}</head>"
             f"<body><main><h1>Page Heading</h1><p>{DEFAULT_BODY_WORDS}</p></main></body></html>"
         )
-        headers: list[tuple[str, str]] = [("content-type", content_type)]
+        headers: list[tuple[str, str]] = [
+            ("content-type", content_type),
+            *DEFAULT_SECURITY_HEADERS.items(),
+        ]
         if isinstance(x_robots_headers, str):
             headers.append(("X-Robots-Tag", x_robots_headers))
         elif isinstance(x_robots_headers, list):
@@ -1603,11 +1612,8 @@ class StructuredDataSeoAuditTests(unittest.TestCase):
                 return make_response("GET", url, 200, ROBOTS_TXT)
             if url.endswith("/sitemap.xml"):
                 return make_sitemap_response(url, (START_URL,))
-            return httpx.Response(
-                200,
-                text=html,
-                headers={"content-type": content_type},
-                request=httpx.Request("GET", url),
+            return make_response(
+                "GET", url, 200, html, content_type=content_type
             )
 
         with patch("crawler.httpx.get", side_effect=fake_get), \
@@ -1800,11 +1806,8 @@ class ContentQualitySeoAuditTests(unittest.TestCase):
                 return make_response("GET", url, 200, ROBOTS_TXT)
             if url.endswith("/sitemap.xml"):
                 return make_sitemap_response(url, (START_URL,))
-            return httpx.Response(
-                200,
-                text=html,
-                headers={"content-type": content_type},
-                request=httpx.Request("GET", url),
+            return make_response(
+                "GET", url, 200, html, content_type=content_type
             )
 
         with patch("crawler.httpx.get", side_effect=fake_get), \
@@ -2044,11 +2047,8 @@ class PerformanceSeoAuditTests(unittest.TestCase):
                 return make_response("GET", url, 200, ROBOTS_TXT)
             if url.endswith("/sitemap.xml"):
                 return make_sitemap_response(url, (START_URL,))
-            resp = httpx.Response(
-                200,
-                text=html,
-                headers={"content-type": content_type},
-                request=httpx.Request("GET", url),
+            resp = make_response(
+                "GET", url, 200, html, content_type=content_type
             )
             resp._elapsed = timedelta(seconds=elapsed_seconds)
             return resp
@@ -2212,11 +2212,8 @@ class AccessibilitySeoAuditTests(unittest.TestCase):
                 return make_response("GET", url, 200, ROBOTS_TXT)
             if url.endswith("/sitemap.xml"):
                 return make_sitemap_response(url, (START_URL,))
-            return httpx.Response(
-                200,
-                text=html,
-                headers={"content-type": content_type},
-                request=httpx.Request("GET", url),
+            return make_response(
+                "GET", url, 200, html, content_type=content_type
             )
 
         with patch("crawler.httpx.get", side_effect=fake_get), \
@@ -3321,6 +3318,355 @@ class SitemapAndRobotsAuditTests(unittest.TestCase):
         self.assertEqual(
             gblocked_issues[0]["directive_source"], "robots_txt"
         )
+
+
+class SecurityAndHttpsAuditTests(unittest.TestCase):
+    def build_valid_html(
+        self,
+        url: str = START_URL,
+        body_inner_html: str = "",
+        extra_head_html: str = "",
+    ) -> str:
+        return (
+            f'<html lang="en"><head><title>Secure Page</title>'
+            '<meta name="description" content="Secure page description">'
+            f'<link rel="canonical" href="{url}">'
+            '<script type="application/ld+json">'
+            '{"@context":"https://schema.org","@type":"WebPage"}'
+            "</script>"
+            f"{extra_head_html}</head>"
+            f"<body><main><h1>Secure Heading</h1><p>{DEFAULT_BODY_WORDS}</p>{body_inner_html}</main></body></html>"
+        )
+
+    def crawl_security_page(
+        self,
+        page_url: str = START_URL,
+        body_inner_html: str = "",
+        extra_head_html: str = "",
+        response_headers: dict[str, str] | list[tuple[str, str]] | None = None,
+        content_type: str = "text/html; charset=utf-8",
+    ) -> dict:
+        html = self.build_valid_html(
+            url=page_url,
+            body_inner_html=body_inner_html,
+            extra_head_html=extra_head_html,
+        )
+        if response_headers is None:
+            headers_to_use: dict[str, str] | list[tuple[str, str]] = {
+                "content-type": content_type,
+                **DEFAULT_SECURITY_HEADERS,
+            }
+        elif isinstance(response_headers, dict):
+            headers_to_use = {
+                "content-type": content_type,
+                **response_headers,
+            }
+        else:
+            headers_to_use = [("content-type", content_type), *response_headers]
+
+        robots_txt = (
+            "User-agent: *\n"
+            "Disallow: /private\n"
+            f"Sitemap: {page_url.split('//')[0]}//example.com/sitemap.xml\n"
+        )
+
+        def fake_get(url, **_):
+            if url.endswith("/robots.txt"):
+                return make_response("GET", url, 200, robots_txt)
+            if url.endswith("/sitemap.xml"):
+                return make_sitemap_response(url, (page_url,))
+            return httpx.Response(
+                200,
+                text=html,
+                headers=headers_to_use,
+                request=httpx.Request("GET", url),
+            )
+
+        with patch("crawler.httpx.get", side_effect=fake_get), \
+             patch("crawler.httpx.head", return_value=make_response("HEAD", page_url, 200)), \
+             patch("crawler.time.sleep"):
+            pages = crawler.crawl_website(page_url, max_pages=1, max_depth=0)
+        return pages[0]
+
+    def test_clean_https_page_with_all_security_headers_produces_no_issues(self):
+        page = self.crawl_security_page(
+            page_url=START_URL,
+            body_inner_html=(
+                '<a href="https://example.com/about">About</a>'
+                '<img src="https://example.com/logo.png" alt="Logo">'
+                '<script src="https://cdn.example.org/app.js"></script>'
+                '<form action="https://example.com/login" method="post">'
+                '  <label for="pw">Password</label>'
+                '  <input id="pw" type="password" name="password">'
+                "</form>"
+            ),
+        )
+        self.assertTrue(page["is_https"])
+        self.assertEqual(page["seo_issues"], [])
+
+        summary = crawler.summarize_security_audit([page])
+        self.assertEqual(
+            summary,
+            {
+                "https_pages_count": 1,
+                "http_pages_count": 0,
+                "mixed_content_pages_count": 0,
+                "missing_security_headers_pages_count": 0,
+                "total_security_issues": 0,
+                "severity_counts": {"error": 0, "warning": 0, "info": 0},
+            },
+        )
+
+    def test_http_page_detected_and_missing_hsts_not_reported_on_http(self):
+        http_url = "http://example.com/"
+        # Provide all non-HSTS security headers; HTTP page should report http_page
+        # and should NOT report missing_hsts or mixed_content even when referencing HTTP images/scripts
+        non_hsts_headers = {
+            k: v
+            for k, v in DEFAULT_SECURITY_HEADERS.items()
+            if k != "strict-transport-security"
+        }
+        page = self.crawl_security_page(
+            page_url=http_url,
+            body_inner_html=(
+                '<a href="/relative-link">Relative Link</a>'
+                '<img src="http://example.com/banner.jpg" alt="Banner">'
+                '<script src="http://cdn.external.org/lib.js"></script>'
+            ),
+            response_headers=non_hsts_headers,
+        )
+        self.assertFalse(page["is_https"])
+        issue_types = [i["type"] for i in page["seo_issues"]]
+        self.assertEqual(issue_types, ["http_page"])
+        self.assertEqual(page["seo_issues"][0]["severity"], "warning")
+        self.assertEqual(page["seo_issues"][0]["url"], http_url)
+
+    def test_http_internal_link_detected_without_flagging_external_http_links(self):
+        page = self.crawl_security_page(
+            page_url=START_URL,
+            body_inner_html=(
+                '<a href="http://example.com/insecure-page">Insecure Internal 1</a>'
+                '<a href="http://example.com/insecure-page#sec">Insecure Internal Dup</a>'
+                '<a href="http://EXAMPLE.COM/second-insecure">Insecure Internal 2</a>'
+                '<a href="https://example.com/secure-page">Secure Internal</a>'
+                '<a href="http://external.org/out">External HTTP Link</a>'
+            ),
+        )
+        self.assertEqual(len(page["seo_issues"]), 1)
+        issue = page["seo_issues"][0]
+        self.assertEqual(issue["type"], "http_internal_link")
+        self.assertEqual(issue["severity"], "warning")
+        self.assertEqual(
+            issue["insecure_urls"],
+            [
+                "http://example.com/insecure-page",
+                "http://EXAMPLE.COM/second-insecure",
+            ],
+        )
+
+    def test_mixed_content_and_internal_vs_external_http_resources(self):
+        # 1. Internal-only HTTP subresources on an HTTPS page -> mixed_content only
+        internal_mixed_page = self.crawl_security_page(
+            page_url=START_URL,
+            extra_head_html='<link rel="stylesheet" href="http://example.com/styles.css">',
+            body_inner_html=(
+                '<img src="http://example.com/photo.jpg" alt="Photo">'
+                '<script src="http://example.com/bundle.js"></script>'
+                '<iframe src="http://example.com/embed" title="Embed"></iframe>'
+            ),
+        )
+        internal_types = [i["type"] for i in internal_mixed_page["seo_issues"]]
+        self.assertEqual(internal_types, ["mixed_content"])
+        mixed_issue = internal_mixed_page["seo_issues"][0]
+        self.assertEqual(mixed_issue["severity"], "warning")
+        self.assertEqual(
+            mixed_issue["insecure_urls"],
+            [
+                "http://example.com/bundle.js",
+                "http://example.com/styles.css",
+                "http://example.com/photo.jpg",
+                "http://example.com/embed",
+            ],
+        )
+
+        # 2. External HTTP subresources on an HTTPS page -> mixed_content AND insecure_external_resource
+        external_mixed_page = self.crawl_security_page(
+            page_url=START_URL,
+            extra_head_html='<link rel="stylesheet" href="http://cdn.external.org/theme.css">',
+            body_inner_html=(
+                '<script src="http://cdn.external.org/tracker.js"></script>'
+                '<img src="http://example.com/local.jpg" alt="Local">'
+            ),
+        )
+        ext_types = [i["type"] for i in external_mixed_page["seo_issues"]]
+        self.assertEqual(
+            ext_types, ["mixed_content", "insecure_external_resource"]
+        )
+        ext_issue = next(
+            i
+            for i in external_mixed_page["seo_issues"]
+            if i["type"] == "insecure_external_resource"
+        )
+        self.assertEqual(ext_issue["severity"], "warning")
+        self.assertEqual(
+            ext_issue["insecure_urls"],
+            [
+                "http://cdn.external.org/tracker.js",
+                "http://cdn.external.org/theme.css",
+            ],
+        )
+
+    def test_insecure_form_action_and_sensitive_form_over_http(self):
+        # 1. Non-sensitive form on HTTPS page submitting to HTTP -> insecure_form_action only
+        non_sensitive_form_page = self.crawl_security_page(
+            page_url=START_URL,
+            body_inner_html=(
+                '<form action="http://example.com/search" method="get">'
+                '  <label for="q">Search</label>'
+                '  <input id="q" type="search" name="query">'
+                "</form>"
+            ),
+        )
+        self.assertEqual(
+            [i["type"] for i in non_sensitive_form_page["seo_issues"]],
+            ["insecure_form_action"],
+        )
+        self.assertEqual(
+            non_sensitive_form_page["seo_issues"][0]["form_action"],
+            "http://example.com/search",
+        )
+
+        # 2. Sensitive password form on HTTPS page submitting to HTTP -> both insecure_form_action and sensitive_form_over_http
+        https_sensitive_page = self.crawl_security_page(
+            page_url=START_URL,
+            body_inner_html=(
+                '<form action="http://example.com/auth">'
+                '  <label for="user-pass">Password</label>'
+                '  <input id="user-pass" type="password" name="pwd">'
+                "</form>"
+            ),
+        )
+        self.assertEqual(
+            [i["type"] for i in https_sensitive_page["seo_issues"]],
+            ["insecure_form_action", "sensitive_form_over_http"],
+        )
+
+        # 3. Sensitive form (by name/autocomplete) on an HTTP page with relative action -> http_page and sensitive_form_over_http
+        http_url = "http://example.com/"
+        non_hsts_headers = {
+            k: v
+            for k, v in DEFAULT_SECURITY_HEADERS.items()
+            if k != "strict-transport-security"
+        }
+        http_sensitive_page = self.crawl_security_page(
+            page_url=http_url,
+            body_inner_html=(
+                '<form action="/checkout" method="post">'
+                '  <label for="cc">Card Number</label>'
+                '  <input id="cc" type="text" name="credit_card" autocomplete="cc-number">'
+                "</form>"
+            ),
+            response_headers=non_hsts_headers,
+        )
+        self.assertEqual(
+            [i["type"] for i in http_sensitive_page["seo_issues"]],
+            ["http_page", "sensitive_form_over_http"],
+        )
+        sens_issue = http_sensitive_page["seo_issues"][1]
+        self.assertEqual(sens_issue["severity"], "warning")
+        self.assertEqual(
+            sens_issue["form_action"], "http://example.com/checkout"
+        )
+
+        # 4. Non-sensitive form on an HTTP page -> http_page only (no false-positive sensitive_form_over_http or insecure_form_action)
+        http_search_page = self.crawl_security_page(
+            page_url=http_url,
+            body_inner_html=(
+                '<form action="/search" method="get">'
+                '  <label for="s">Keyword</label>'
+                '  <input id="s" type="text" name="keyword">'
+                "</form>"
+            ),
+            response_headers=non_hsts_headers,
+        )
+        self.assertEqual(
+            [i["type"] for i in http_search_page["seo_issues"]],
+            ["http_page"],
+        )
+
+    def test_missing_security_headers_and_case_insensitive_and_csp_frame_ancestors(self):
+        # 1. Missing all security headers on HTTPS page -> all 6 header issues reported
+        no_sec_headers_page = self.crawl_security_page(
+            page_url=START_URL,
+            response_headers={},
+        )
+        issue_types = [i["type"] for i in no_sec_headers_page["seo_issues"]]
+        self.assertEqual(
+            issue_types,
+            [
+                "missing_hsts",
+                "missing_content_security_policy",
+                "missing_x_content_type_options",
+                "missing_x_frame_options",
+                "missing_referrer_policy",
+                "missing_permissions_policy",
+            ],
+        )
+
+        summary = crawler.summarize_security_audit([no_sec_headers_page])
+        self.assertEqual(
+            summary,
+            {
+                "https_pages_count": 1,
+                "http_pages_count": 0,
+                "mixed_content_pages_count": 0,
+                "missing_security_headers_pages_count": 1,
+                "total_security_issues": 6,
+                "severity_counts": {"error": 0, "warning": 4, "info": 2},
+            },
+        )
+
+        # 2. Case-insensitive headers and CSP frame-ancestors satisfying X-Frame-Options
+        csp_frame_headers = [
+            ("STRICT-TRANSPORT-SECURITY", "max-age=63072000"),
+            (
+                "Content-Security-Policy",
+                "default-src 'self'; FRAME-ANCESTORS 'none'",
+            ),
+            ("x-content-type-options", "nosniff"),
+            ("REFERRER-POLICY", "no-referrer"),
+            ("Permissions-Policy", "camera=()"),
+        ]
+        csp_frame_page = self.crawl_security_page(
+            page_url=START_URL,
+            response_headers=csp_frame_headers,
+        )
+        self.assertEqual(csp_frame_page["seo_issues"], [])
+
+        # 3. CSP without frame-ancestors and without X-Frame-Options still reports missing_x_frame_options
+        csp_without_frame_headers = {
+            "Strict-Transport-Security": "max-age=31536000",
+            "Content-Security-Policy": "default-src 'self'",
+            "X-Content-Type-Options": "nosniff",
+            "Referrer-Policy": "same-origin",
+            "Permissions-Policy": "geolocation=()",
+        }
+        missing_frame_page = self.crawl_security_page(
+            page_url=START_URL,
+            response_headers=csp_without_frame_headers,
+        )
+        self.assertEqual(
+            [i["type"] for i in missing_frame_page["seo_issues"]],
+            ["missing_x_frame_options"],
+        )
+
+    def test_non_html_response_excluded_from_security_audit(self):
+        json_page = self.crawl_security_page(
+            page_url="http://example.com/api/data.json",
+            response_headers={},
+            content_type="application/json",
+        )
+        self.assertEqual(json_page["seo_issues"], [])
 
 
 if __name__ == "__main__":

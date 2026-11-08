@@ -5,7 +5,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 
-from crawler import crawl_website, summarize_sitemap_coverage
+from crawler import (
+    crawl_website,
+    summarize_security_audit,
+    summarize_sitemap_coverage,
+)
 
 app = FastAPI()
 
@@ -70,6 +74,7 @@ def run_crawl(request: CrawlRequest) -> dict[str, Any]:
         "pages_crawled": len(pages),
         "links_checked": len(links),
         "sitemap_coverage": summarize_sitemap_coverage(pages),
+        "security_summary": summarize_security_audit(pages),
         "pages": pages,
         "links": links,
     }

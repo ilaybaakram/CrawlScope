@@ -15,6 +15,7 @@ SAMPLE_PAGE = {
     "total_links": 1,
     "incoming_internal_links": 0,
     "outgoing_internal_links": 1,
+    "is_https": True,
     "in_sitemap": True,
     "content_type": "text/html",
     "response_time_ms": 2300.0,
@@ -128,6 +129,13 @@ SAMPLE_PAGE = {
             "sitemap_urls": ["https://example.com/uncrawled"],
             "sitemap_not_crawled_count": 1,
         },
+        {
+            "type": "missing_hsts",
+            "severity": "warning",
+            "message": "HTTPS response lacks a Strict-Transport-Security (HSTS) header; add 'Strict-Transport-Security: max-age=31536000; includeSubDomains' so browsers enforce HTTPS connections.",
+            "url": "https://example.com/",
+            "missing_header": "Strict-Transport-Security",
+        },
     ],
     "error": None,
 }
@@ -201,6 +209,21 @@ class FastAPIEndpointTests(unittest.TestCase):
                 "sitemap_not_crawled_count": 1,
             },
         )
+        self.assertEqual(
+            data["security_summary"],
+            {
+                "https_pages_count": 1,
+                "http_pages_count": 0,
+                "mixed_content_pages_count": 0,
+                "missing_security_headers_pages_count": 1,
+                "total_security_issues": 1,
+                "severity_counts": {
+                    "error": 0,
+                    "warning": 1,
+                    "info": 0,
+                },
+            },
+        )
         self.assertEqual(data["pages"], [SAMPLE_PAGE])
         self.assertEqual(
             [issue["type"] for issue in data["pages"][0]["seo_issues"]],
@@ -219,6 +242,7 @@ class FastAPIEndpointTests(unittest.TestCase):
                 "missing_lang",
                 "nofollow_internal_link",
                 "sitemap_url_not_crawled",
+                "missing_hsts",
             ],
         )
         self.assertEqual(
