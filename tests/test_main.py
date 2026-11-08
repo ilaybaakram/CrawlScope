@@ -19,6 +19,8 @@ SAMPLE_PAGE = {
     "external_links": [],
     "hreflang_count": 0,
     "hreflang_links": [],
+    "has_open_graph": False,
+    "has_twitter_card": False,
     "is_https": True,
     "in_sitemap": True,
     "content_type": "text/html",
@@ -140,6 +142,12 @@ SAMPLE_PAGE = {
             "url": "https://example.com/",
             "missing_header": "Strict-Transport-Security",
         },
+        {
+            "type": "missing_og_title",
+            "severity": "warning",
+            "message": "Page is missing an 'og:title' Open Graph meta tag; social platforms require a title for rich link previews.",
+            "url": "https://example.com/",
+        },
     ],
     "error": None,
 }
@@ -260,6 +268,21 @@ class FastAPIEndpointTests(unittest.TestCase):
                 },
             },
         )
+        self.assertEqual(
+            data["social_summary"],
+            {
+                "pages_with_og_count": 0,
+                "pages_with_twitter_card_count": 0,
+                "missing_required_og_count": 1,
+                "invalid_social_metadata_count": 0,
+                "total_social_issues": 1,
+                "severity_counts": {
+                    "error": 0,
+                    "warning": 1,
+                    "info": 0,
+                },
+            },
+        )
         self.assertEqual(data["pages"], [SAMPLE_PAGE])
         self.assertEqual(
             [issue["type"] for issue in data["pages"][0]["seo_issues"]],
@@ -279,6 +302,7 @@ class FastAPIEndpointTests(unittest.TestCase):
                 "nofollow_internal_link",
                 "sitemap_url_not_crawled",
                 "missing_hsts",
+                "missing_og_title",
             ],
         )
         self.assertEqual(

@@ -16,6 +16,7 @@ const PAGE_FIELDS = [
   "outgoing_internal_links",
   "outgoing_external_links",
   "hreflang_count",
+  "has_open_graph",
   "content_type",
   "response_time_ms",
   "page_size_bytes",
@@ -63,6 +64,29 @@ const HREFLANG_ISSUE_TYPES = new Set([
   "hreflang_canonical_conflict",
   "duplicate_hreflang_language",
   "hreflang_http_url",
+]);
+
+const SOCIAL_ISSUE_TYPES = new Set([
+  "missing_og_title",
+  "missing_og_description",
+  "missing_og_image",
+  "missing_og_url",
+  "missing_og_type",
+  "invalid_og_url",
+  "og_url_canonical_conflict",
+  "og_image_invalid_url",
+  "duplicate_og_tags",
+  "empty_og_metadata",
+  "missing_twitter_card",
+  "missing_twitter_title",
+  "missing_twitter_description",
+  "missing_twitter_image",
+  "invalid_twitter_card",
+  "short_og_title",
+  "long_og_title",
+  "short_og_description",
+  "long_og_description",
+  "social_image_missing_alt",
 ]);
 
 const LINK_FIELDS = ["url", "found_on", "status_code", "result", "error"];
@@ -320,6 +344,43 @@ function App() {
       ).length,
       info: seoIssues.filter(
         (i) => HREFLANG_ISSUE_TYPES.has(i.type) && i.severity === "info"
+      ).length,
+    },
+  };
+  const socialSummary = crawlData?.social_summary || {
+    pages_with_og_count: pages.filter((p) => p.has_open_graph).length,
+    pages_with_twitter_card_count: pages.filter((p) => p.has_twitter_card).length,
+    missing_required_og_count: seoIssues.filter((i) =>
+      [
+        "missing_og_title",
+        "missing_og_description",
+        "missing_og_image",
+        "missing_og_url",
+        "missing_og_type",
+      ].includes(i.type)
+    ).length,
+    invalid_social_metadata_count: seoIssues.filter((i) =>
+      [
+        "invalid_og_url",
+        "og_image_invalid_url",
+        "invalid_twitter_card",
+        "og_url_canonical_conflict",
+        "duplicate_og_tags",
+        "empty_og_metadata",
+      ].includes(i.type)
+    ).length,
+    total_social_issues: seoIssues.filter((i) =>
+      SOCIAL_ISSUE_TYPES.has(i.type)
+    ).length,
+    severity_counts: {
+      error: seoIssues.filter(
+        (i) => SOCIAL_ISSUE_TYPES.has(i.type) && i.severity === "error"
+      ).length,
+      warning: seoIssues.filter(
+        (i) => SOCIAL_ISSUE_TYPES.has(i.type) && i.severity === "warning"
+      ).length,
+      info: seoIssues.filter(
+        (i) => SOCIAL_ISSUE_TYPES.has(i.type) && i.severity === "info"
       ).length,
     },
   };
@@ -645,6 +706,44 @@ function App() {
 
       <section className="card">
         <div className="section-header">
+          <h2>Social Sharing Summary</h2>
+          <div className="seo-metrics">
+            <span className="metric-badge">
+              Pages with Open Graph:{" "}
+              <strong>
+                {crawlData ? socialSummary.pages_with_og_count : 0}
+              </strong>
+            </span>
+            <span className="metric-badge">
+              Pages with Twitter Card:{" "}
+              <strong>
+                {crawlData ? socialSummary.pages_with_twitter_card_count : 0}
+              </strong>
+            </span>
+            <span className="metric-badge">
+              Missing Required OG:{" "}
+              <strong>
+                {crawlData ? socialSummary.missing_required_og_count : 0}
+              </strong>
+            </span>
+            <span className="metric-badge">
+              Invalid Social Metadata:{" "}
+              <strong>
+                {crawlData ? socialSummary.invalid_social_metadata_count : 0}
+              </strong>
+            </span>
+            <span className="metric-badge">
+              Total Social Findings:{" "}
+              <strong>
+                {crawlData ? socialSummary.total_social_issues : 0}
+              </strong>
+            </span>
+          </div>
+        </div>
+      </section>
+
+      <section className="card">
+        <div className="section-header">
           <h2>Download Crawl Results</h2>
           {!crawlData && (
             <span className="section-hint">
@@ -712,6 +811,7 @@ function App() {
                   <th>Outgoing Internal</th>
                   <th>Outgoing External</th>
                   <th>Hreflang</th>
+                  <th>Open Graph</th>
                   <th>HTTPS</th>
                   <th>Security</th>
                   <th>In Sitemap</th>
@@ -758,6 +858,13 @@ function App() {
                         </span>
                       ) : (
                         "—"
+                      )}
+                    </td>
+                    <td>
+                      {page.has_open_graph ? (
+                        <span className="status-pill status-ok">Yes</span>
+                      ) : (
+                        <span className="status-pill status-warning">No</span>
                       )}
                     </td>
                     <td>

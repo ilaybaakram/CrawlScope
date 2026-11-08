@@ -5199,6 +5199,409 @@ def summarize_hreflang_audit(results: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+# Open Graph & Social Sharing Audit
+OPEN_GRAPH_REQUIRED_PROPERTIES = (
+    "og:title",
+    "og:description",
+    "og:image",
+    "og:url",
+    "og:type",
+)
+
+VALID_TWITTER_CARD_TYPES = {
+    "summary",
+    "summary_large_image",
+    "app",
+    "player",
+}
+
+MIN_OG_TITLE_LENGTH = 15
+MAX_OG_TITLE_LENGTH = 90
+MIN_OG_DESCRIPTION_LENGTH = 50
+MAX_OG_DESCRIPTION_LENGTH = 200
+
+SOCIAL_ISSUE_TYPES = {
+    "missing_og_title",
+    "missing_og_description",
+    "missing_og_image",
+    "missing_og_url",
+    "missing_og_type",
+    "invalid_og_url",
+    "og_url_canonical_conflict",
+    "og_image_invalid_url",
+    "duplicate_og_tags",
+    "empty_og_metadata",
+    "missing_twitter_card",
+    "missing_twitter_title",
+    "missing_twitter_description",
+    "missing_twitter_image",
+    "invalid_twitter_card",
+    "short_og_title",
+    "long_og_title",
+    "short_og_description",
+    "long_og_description",
+    "social_image_missing_alt",
+}
+
+SOCIAL_ISSUE_SEVERITIES = {
+    "missing_og_title": "warning",
+    "missing_og_description": "warning",
+    "missing_og_image": "warning",
+    "missing_og_url": "warning",
+    "missing_og_type": "warning",
+    "invalid_og_url": "error",
+    "og_url_canonical_conflict": "warning",
+    "og_image_invalid_url": "error",
+    "duplicate_og_tags": "warning",
+    "empty_og_metadata": "warning",
+    "missing_twitter_card": "warning",
+    "missing_twitter_title": "warning",
+    "missing_twitter_description": "warning",
+    "missing_twitter_image": "warning",
+    "invalid_twitter_card": "error",
+    "short_og_title": "warning",
+    "long_og_title": "warning",
+    "short_og_description": "warning",
+    "long_og_description": "warning",
+    "social_image_missing_alt": "info",
+}
+
+
+def _is_valid_absolute_http_url(val: str | None) -> bool:
+    """Check if the given string is a valid absolute HTTP or HTTPS URL."""
+    if not val or not isinstance(val, str):
+        return False
+    try:
+        parsed = urlparse(val.strip())
+        return parsed.scheme.lower() in ("http", "https") and bool(parsed.netloc)
+    except Exception:
+        return False
+
+
+def _normalize_sharing_url(raw_url: str | None) -> str:
+    """Normalize URL by stripping fragment, lowercasing scheme/host, and normalizing trailing slash."""
+    if not raw_url:
+        return ""
+    clean, _ = urldefrag(str(raw_url).strip())
+    parsed = urlparse(clean)
+    scheme = parsed.scheme.lower()
+    netloc = parsed.netloc.lower()
+    path = parsed.path or "/"
+    if path != "/" and path.endswith("/"):
+        path = path.rstrip("/")
+    return urlunparse((scheme, netloc, path, parsed.params, parsed.query, ""))
+
+
+def _extract_social_metadata(
+    soup: BeautifulSoup | None,
+) -> tuple[dict[str, list[str]], dict[str, list[str]], list[str]]:
+    """Extract Open Graph and Twitter Card metadata from HTML.
+
+    Returns:
+        (og_data, twitter_data, empty_tags)
+        where og_data and twitter_data map lowercased property names to
+        lists of non-empty content strings, and empty_tags lists property
+        names with empty or whitespace-only content.
+    """
+    og_data: dict[str, list[str]] = {}
+    twitter_data: dict[str, list[str]] = {}
+    empty_tags: list[str] = []
+
+    if not soup:
+        return og_data, twitter_data, empty_tags
+
+    for meta in soup.find_all("meta"):
+        prop = (meta.get("property") or meta.get("name") or "").strip().lower()
+        if not prop:
+            continue
+        content = meta.get("content")
+        raw_val = content if content is not None else ""
+        cleaned_val = raw_val.strip()
+
+        if prop.startswith("og:"):
+            if not cleaned_val:
+                empty_tags.append(prop)
+            else:
+                og_data.setdefault(prop, []).append(cleaned_val)
+        elif prop.startswith("twitter:"):
+            if not cleaned_val:
+                empty_tags.append(prop)
+            else:
+                twitter_data.setdefault(prop, []).append(cleaned_val)
+
+    return og_data, twitter_data, empty_tags
+
+
+def detect_social_seo_issues(
+    url: str,
+    soup: BeautifulSoup | None,
+    content_type: str | None = "text/html",
+    canonical_url: str | None = None,
+) -> list[dict[str, Any]]:
+    """Audit Open Graph and Twitter Card social metadata for a crawled HTML page."""
+    if not is_html_content(content_type) or soup is None:
+        return []
+
+    issues: list[dict[str, Any]] = []
+    seen_types: set[str] = set()
+
+    def add_issue(issue_type: str, message: str, **extra: Any) -> None:
+        if issue_type not in seen_types:
+            seen_types.add(issue_type)
+            issue_dict = {
+                "type": issue_type,
+                "severity": SOCIAL_ISSUE_SEVERITIES.get(issue_type, "warning"),
+                "message": message,
+                "url": url,
+            }
+            issue_dict.update(extra)
+            issues.append(issue_dict)
+
+    og_data, twitter_data, empty_tags = _extract_social_metadata(soup)
+
+    if not og_data and not twitter_data and not empty_tags:
+        return []
+
+    # 1. empty_og_metadata
+    if empty_tags:
+        empty_props = ", ".join(sorted(set(empty_tags)))
+        add_issue(
+            "empty_og_metadata",
+            f"Social metadata tag(s) exist but have empty or whitespace content: {empty_props}.",
+        )
+
+    # Open Graph properties
+    og_title_list = og_data.get("og:title", [])
+    og_desc_list = og_data.get("og:description", [])
+    og_image_list = og_data.get("og:image", [])
+    og_url_list = og_data.get("og:url", [])
+    og_type_list = og_data.get("og:type", [])
+
+    og_title = og_title_list[0] if og_title_list else None
+    og_desc = og_desc_list[0] if og_desc_list else None
+    og_image = og_image_list[0] if og_image_list else None
+    og_url = og_url_list[0] if og_url_list else None
+    og_type = og_type_list[0] if og_type_list else None
+
+    # 2. missing_og_title
+    if not og_title:
+        add_issue(
+            "missing_og_title",
+            "Page is missing an 'og:title' Open Graph meta tag; social platforms require a title for rich link previews.",
+        )
+
+    # 3. missing_og_description
+    if not og_desc:
+        add_issue(
+            "missing_og_description",
+            "Page is missing an 'og:description' Open Graph meta tag; add a summary description for social previews.",
+        )
+
+    # 4. missing_og_image
+    if not og_image:
+        add_issue(
+            "missing_og_image",
+            "Page is missing an 'og:image' Open Graph meta tag; social platforms need a preview image to generate rich visual cards.",
+        )
+
+    # 5. missing_og_url
+    if not og_url:
+        add_issue(
+            "missing_og_url",
+            "Page is missing an 'og:url' Open Graph meta tag; specify the canonical sharing URL.",
+        )
+
+    # 6. missing_og_type
+    if not og_type:
+        add_issue(
+            "missing_og_type",
+            "Page is missing an 'og:type' Open Graph meta tag (e.g. 'website', 'article'); specify the content type for social graphs.",
+        )
+
+    # 7. duplicate_og_tags (conflicting multiple values for scalar properties)
+    duplicate_conflicts = []
+    for prop in ("og:title", "og:description", "og:url", "og:type"):
+        vals = og_data.get(prop, [])
+        unique_vals = list(dict.fromkeys(v.strip() for v in vals if v.strip()))
+        if len(unique_vals) > 1:
+            duplicate_conflicts.append(f"{prop} ({', '.join(repr(v) for v in unique_vals)})")
+    if duplicate_conflicts:
+        add_issue(
+            "duplicate_og_tags",
+            f"Multiple conflicting values declared for Open Graph property: {'; '.join(duplicate_conflicts)}.",
+        )
+
+    # 8. invalid_og_url
+    if og_url and not _is_valid_absolute_http_url(og_url):
+        add_issue(
+            "invalid_og_url",
+            f"Open Graph 'og:url' ('{og_url}') is malformed or not an absolute HTTP/HTTPS URL.",
+        )
+
+    # 9. og_url_canonical_conflict
+    actual_canonical = canonical_url
+    if actual_canonical is None and soup:
+        can_tags = _find_canonical_link_tags(soup)
+        if can_tags:
+            resolved_can, is_can_valid = _resolve_canonical_url(url, can_tags[0].get("href"))
+            if is_can_valid:
+                actual_canonical = resolved_can
+
+    if og_url and actual_canonical and _is_valid_absolute_http_url(og_url):
+        if _normalize_sharing_url(og_url) != _normalize_sharing_url(actual_canonical):
+            add_issue(
+                "og_url_canonical_conflict",
+                f"Open Graph URL ('{og_url}') conflicts with declared canonical URL ('{actual_canonical}'); align og:url with canonical URL.",
+                canonical_url=actual_canonical,
+            )
+
+    # 10. og_image_invalid_url
+    if og_image_list:
+        invalid_imgs = [img for img in og_image_list if not _is_valid_absolute_http_url(img)]
+        if invalid_imgs:
+            add_issue(
+                "og_image_invalid_url",
+                f"Open Graph image URL ('{invalid_imgs[0]}') is malformed or not an absolute HTTP/HTTPS URL.",
+                image_url=invalid_imgs[0],
+            )
+
+    # Twitter Card Metadata
+    twitter_card_list = twitter_data.get("twitter:card", [])
+    twitter_card = twitter_card_list[0] if twitter_card_list else None
+    twitter_title = twitter_data.get("twitter:title", [None])[0]
+    twitter_desc = twitter_data.get("twitter:description", [None])[0]
+    twitter_image = twitter_data.get("twitter:image", [None])[0]
+
+    # 11. missing_twitter_card
+    if not twitter_card:
+        add_issue(
+            "missing_twitter_card",
+            "Page lacks a 'twitter:card' meta tag; specify 'summary' or 'summary_large_image' to control Twitter/X card presentation.",
+        )
+    else:
+        # 12. invalid_twitter_card
+        if twitter_card.lower() not in VALID_TWITTER_CARD_TYPES:
+            add_issue(
+                "invalid_twitter_card",
+                f"Invalid twitter:card value '{twitter_card}'; supported card types are 'summary', 'summary_large_image', 'app', 'player'.",
+            )
+
+    # 13. missing_twitter_title (fallback to og:title)
+    if not twitter_title and not og_title:
+        add_issue(
+            "missing_twitter_title",
+            "Page lacks a 'twitter:title' meta tag and no 'og:title' fallback was found for Twitter/X previews.",
+        )
+
+    # 14. missing_twitter_description (fallback to og:description)
+    if not twitter_desc and not og_desc:
+        add_issue(
+            "missing_twitter_description",
+            "Page lacks a 'twitter:description' meta tag and no 'og:description' fallback was found for Twitter/X previews.",
+        )
+
+    # 15. missing_twitter_image (fallback to og:image)
+    if not twitter_image and not og_image:
+        add_issue(
+            "missing_twitter_image",
+            "Page lacks a 'twitter:image' meta tag and no 'og:image' fallback was found for Twitter/X previews.",
+        )
+
+    # Social Sharing Quality
+    # 16. short_og_title
+    if og_title and len(og_title) < MIN_OG_TITLE_LENGTH:
+        add_issue(
+            "short_og_title",
+            f"Open Graph title is unusually short ({len(og_title)} characters; recommended at least {MIN_OG_TITLE_LENGTH}): '{og_title}'.",
+        )
+
+    # 17. long_og_title
+    if og_title and len(og_title) > MAX_OG_TITLE_LENGTH:
+        add_issue(
+            "long_og_title",
+            f"Open Graph title exceeds recommended length ({len(og_title)} characters; recommended max {MAX_OG_TITLE_LENGTH} to avoid truncation): '{og_title[:50]}...'.",
+        )
+
+    # 18. short_og_description
+    if og_desc and len(og_desc) < MIN_OG_DESCRIPTION_LENGTH:
+        add_issue(
+            "short_og_description",
+            f"Open Graph description is unusually short ({len(og_desc)} characters; recommended at least {MIN_OG_DESCRIPTION_LENGTH}): '{og_desc}'.",
+        )
+
+    # 19. long_og_description
+    if og_desc and len(og_desc) > MAX_OG_DESCRIPTION_LENGTH:
+        add_issue(
+            "long_og_description",
+            f"Open Graph description exceeds recommended length ({len(og_desc)} characters; recommended max {MAX_OG_DESCRIPTION_LENGTH} to avoid truncation): '{og_desc[:50]}...'.",
+        )
+
+    # 20. social_image_missing_alt
+    social_img = og_image or twitter_image
+    if social_img:
+        has_img_alt = bool(og_data.get("og:image:alt")) or bool(twitter_data.get("twitter:image:alt"))
+        if not has_img_alt:
+            add_issue(
+                "social_image_missing_alt",
+                "Social sharing image is specified but lacks descriptive alternative text ('og:image:alt' or 'twitter:image:alt').",
+                image_url=social_img,
+            )
+
+    return issues
+
+
+def summarize_social_audit(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Calculate Open Graph & Social Sharing Summary statistics from crawled pages."""
+    pages_with_og = sum(1 for p in results if p.get("has_open_graph"))
+    pages_with_twitter = sum(1 for p in results if p.get("has_twitter_card"))
+
+    all_issues = [
+        issue
+        for page in results
+        for issue in page.get("seo_issues", [])
+        if issue.get("type") in SOCIAL_ISSUE_TYPES
+    ]
+
+    missing_required_og_count = sum(
+        1
+        for i in all_issues
+        if i.get("type")
+        in (
+            "missing_og_title",
+            "missing_og_description",
+            "missing_og_image",
+            "missing_og_url",
+            "missing_og_type",
+        )
+    )
+    invalid_social_metadata_count = sum(
+        1
+        for i in all_issues
+        if i.get("type")
+        in (
+            "invalid_og_url",
+            "og_image_invalid_url",
+            "invalid_twitter_card",
+            "og_url_canonical_conflict",
+            "duplicate_og_tags",
+            "empty_og_metadata",
+        )
+    )
+
+    return {
+        "pages_with_og_count": pages_with_og,
+        "pages_with_twitter_card_count": pages_with_twitter,
+        "missing_required_og_count": missing_required_og_count,
+        "invalid_social_metadata_count": invalid_social_metadata_count,
+        "total_social_issues": len(all_issues),
+        "severity_counts": {
+            "error": sum(1 for i in all_issues if i.get("severity") == "error"),
+            "warning": sum(1 for i in all_issues if i.get("severity") == "warning"),
+            "info": sum(1 for i in all_issues if i.get("severity") == "info"),
+        },
+    }
+
+
 def crawl_website(
     start_url: str,
     max_pages: int = 10,
@@ -5355,6 +5758,8 @@ def crawl_website(
                     "external_links": [],
                     "hreflang_count": 0,
                     "hreflang_links": [],
+                    "has_open_graph": False,
+                    "has_twitter_card": False,
                     "canonical_url": None,
                     "content_type": content_type,
                     "response_time_ms": response_time_ms,
@@ -5569,6 +5974,18 @@ def crawl_website(
                     )
                 )
 
+                og_data, twitter_data, _ = _extract_social_metadata(soup)
+                results[-1]["has_open_graph"] = bool(og_data)
+                results[-1]["has_twitter_card"] = bool(twitter_data.get("twitter:card"))
+                seo_issues.extend(
+                    detect_social_seo_issues(
+                        url=current_url,
+                        soup=soup,
+                        content_type=content_type,
+                        canonical_url=page_canonical_url,
+                    )
+                )
+
                 ext_links = _extract_external_links(
                     current_url, soup, target_hostname
                 )
@@ -5637,6 +6054,8 @@ def crawl_website(
                     "external_links": [],
                     "hreflang_count": 0,
                     "hreflang_links": [],
+                    "has_open_graph": False,
+                    "has_twitter_card": False,
                     "canonical_url": None,
                     "content_type": None,
                     "response_time_ms": None,
@@ -5668,6 +6087,8 @@ def crawl_website(
                     "external_links": [],
                     "hreflang_count": 0,
                     "hreflang_links": [],
+                    "has_open_graph": False,
+                    "has_twitter_card": False,
                     "canonical_url": None,
                     "content_type": error.response.headers.get("content-type"),
                     "response_time_ms": response_time_ms,

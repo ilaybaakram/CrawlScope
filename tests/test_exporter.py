@@ -19,6 +19,7 @@ SAMPLE_PAGES = [
         "outgoing_internal_links": 8,
         "outgoing_external_links": 2,
         "hreflang_count": 0,
+        "has_open_graph": False,
         "is_https": True,
         "in_sitemap": True,
         "content_type": "text/html; charset=utf-8",
@@ -39,6 +40,7 @@ SAMPLE_PAGES = [
         "outgoing_internal_links": 0,
         "outgoing_external_links": 0,
         "hreflang_count": 0,
+        "has_open_graph": False,
         "is_https": True,
         "in_sitemap": False,
         "content_type": "text/html",
@@ -59,6 +61,7 @@ SAMPLE_PAGES = [
         "outgoing_internal_links": 2,
         "outgoing_external_links": 1,
         "hreflang_count": 0,
+        "has_open_graph": False,
         "is_https": True,
         "in_sitemap": False,
         "content_type": "text/html",
@@ -189,6 +192,12 @@ SAMPLE_PAGES = [
                 "url": "https://example.com/café",
                 "missing_header": "Strict-Transport-Security",
             },
+            {
+                "type": "missing_og_image",
+                "severity": "warning",
+                "message": "Page is missing an 'og:image' Open Graph meta tag; social platforms need a preview image to generate rich visual cards.",
+                "url": "https://example.com/café",
+            },
         ],
         "error": None,
     },
@@ -312,7 +321,7 @@ class PageExportTests(ExporterTestCase):
         self.assertIn("seo_issues", rows[0])
         self.assertEqual(json.loads(rows[0]["seo_issues"]), [])
         parsed_issues = json.loads(rows[2]["seo_issues"])
-        self.assertEqual(len(parsed_issues), 16)
+        self.assertEqual(len(parsed_issues), 17)
         self.assertEqual(parsed_issues[0]["type"], "missing_meta_description")
         self.assertEqual(parsed_issues[2]["type"], "duplicate_title")
         self.assertEqual(parsed_issues[3]["type"], "missing_image_alt")
@@ -370,6 +379,8 @@ class PageExportTests(ExporterTestCase):
         self.assertEqual(
             parsed_issues[15]["missing_header"], "Strict-Transport-Security"
         )
+        self.assertEqual(parsed_issues[16]["type"], "missing_og_image")
+        self.assertEqual(parsed_issues[16]["severity"], "warning")
 
         json_data = read_json(json_path)
         self.assertEqual(json_data[2]["seo_issues"], SAMPLE_PAGES[2]["seo_issues"])

@@ -11,6 +11,7 @@ from crawler import (
     summarize_hreflang_audit,
     summarize_security_audit,
     summarize_sitemap_coverage,
+    summarize_social_audit,
 )
 
 app = FastAPI()
@@ -79,6 +80,7 @@ def run_crawl(request: CrawlRequest) -> dict[str, Any]:
         "security_summary": summarize_security_audit(pages),
         "external_link_summary": summarize_external_links(pages),
         "hreflang_summary": summarize_hreflang_audit(pages),
+        "social_summary": summarize_social_audit(pages),
         "pages": pages,
         "links": links,
     }

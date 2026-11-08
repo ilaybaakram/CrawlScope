@@ -2,6 +2,7 @@ import unittest
 from typing import Any
 from unittest.mock import patch
 
+from bs4 import BeautifulSoup
 import httpx
 
 import crawler
@@ -4420,6 +4421,410 @@ class InternationalSeoAndHreflangAuditTests(unittest.TestCase):
         self.assertEqual(summary["severity_counts"]["error"], 2)
         self.assertEqual(summary["severity_counts"]["warning"], 1)
         self.assertEqual(summary["severity_counts"]["info"], 1)
+
+
+class SocialSharingAuditTests(unittest.TestCase):
+    def make_soup(self, meta_tags_html: str, canonical: str | None = None) -> BeautifulSoup:
+        canonical_tag = f'<link rel="canonical" href="{canonical}">' if canonical else ""
+        html = (
+            f'<!DOCTYPE html><html lang="en"><head>'
+            f'<title>Page Title</title>{canonical_tag}{meta_tags_html}'
+            f'</head><body><h1>Heading</h1></body></html>'
+        )
+        return BeautifulSoup(html, "html.parser")
+
+    def test_complete_valid_open_graph_and_twitter_card_produces_no_issues(self):
+        meta_html = (
+            '<meta property="og:title" content="A Great Page Title for Social Sharing">'
+            '<meta property="og:description" content="This is an informative and concise page description suitable for social sharing previews.">'
+            '<meta property="og:image" content="https://example.com/images/hero.jpg">'
+            '<meta property="og:image:alt" content="A scenic mountain view">'
+            '<meta property="og:url" content="https://example.com/blog/article">'
+            '<meta property="og:type" content="article">'
+            '<meta name="twitter:card" content="summary_large_image">'
+        )
+        soup = self.make_soup(meta_html, canonical="https://example.com/blog/article")
+        issues = crawler.detect_social_seo_issues(
+            "https://example.com/blog/article",
+            soup,
+            content_type="text/html; charset=utf-8",
+        )
+        self.assertEqual(issues, [])
+
+    def test_missing_individual_open_graph_properties_detected(self):
+        # Missing og:title
+        soup = self.make_soup(
+            '<meta property="og:description" content="This is an informative page description that meets the required length threshold.">'
+            '<meta property="og:image" content="https://example.com/hero.jpg">'
+            '<meta property="og:url" content="https://example.com/">'
+            '<meta property="og:type" content="website">'
+            '<meta name="twitter:card" content="summary">'
+            '<meta property="og:image:alt" content="Alt">'
+        )
+        issues = crawler.detect_social_seo_issues("https://example.com/", soup)
+        types = [i["type"] for i in issues]
+        self.assertIn("missing_og_title", types)
+        self.assertIn("missing_twitter_title", types)
+
+        # Missing og:description
+        soup = self.make_soup(
+            '<meta property="og:title" content="A Valid Page Title Here">'
+            '<meta property="og:image" content="https://example.com/hero.jpg">'
+            '<meta property="og:url" content="https://example.com/">'
+            '<meta property="og:type" content="website">'
+            '<meta name="twitter:card" content="summary">'
+            '<meta property="og:image:alt" content="Alt">'
+        )
+        issues = crawler.detect_social_seo_issues("https://example.com/", soup)
+        types = [i["type"] for i in issues]
+        self.assertIn("missing_og_description", types)
+        self.assertIn("missing_twitter_description", types)
+
+        # Missing og:image
+        soup = self.make_soup(
+            '<meta property="og:title" content="A Valid Page Title Here">'
+            '<meta property="og:description" content="This is an informative page description that meets the required length threshold.">'
+            '<meta property="og:url" content="https://example.com/">'
+            '<meta property="og:type" content="website">'
+            '<meta name="twitter:card" content="summary">'
+        )
+        issues = crawler.detect_social_seo_issues("https://example.com/", soup)
+        types = [i["type"] for i in issues]
+        self.assertIn("missing_og_image", types)
+        self.assertIn("missing_twitter_image", types)
+
+        # Missing og:url
+        soup = self.make_soup(
+            '<meta property="og:title" content="A Valid Page Title Here">'
+            '<meta property="og:description" content="This is an informative page description that meets the required length threshold.">'
+            '<meta property="og:image" content="https://example.com/hero.jpg">'
+            '<meta property="og:image:alt" content="Alt">'
+            '<meta property="og:type" content="website">'
+            '<meta name="twitter:card" content="summary">'
+        )
+        issues = crawler.detect_social_seo_issues("https://example.com/", soup)
+        types = [i["type"] for i in issues]
+        self.assertIn("missing_og_url", types)
+
+        # Missing og:type
+        soup = self.make_soup(
+            '<meta property="og:title" content="A Valid Page Title Here">'
+            '<meta property="og:description" content="This is an informative page description that meets the required length threshold.">'
+            '<meta property="og:image" content="https://example.com/hero.jpg">'
+            '<meta property="og:image:alt" content="Alt">'
+            '<meta property="og:url" content="https://example.com/">'
+            '<meta name="twitter:card" content="summary">'
+        )
+        issues = crawler.detect_social_seo_issues("https://example.com/", soup)
+        types = [i["type"] for i in issues]
+        self.assertIn("missing_og_type", types)
+
+    def test_twitter_card_fallbacks_to_open_graph(self):
+        # twitter tags absent, but og:title, og:description, og:image present -> no missing_twitter_*
+        soup = self.make_soup(
+            '<meta property="og:title" content="A Valid Page Title Here">'
+            '<meta property="og:description" content="This is an informative page description that meets the required length threshold.">'
+            '<meta property="og:image" content="https://example.com/hero.jpg">'
+            '<meta property="og:image:alt" content="Alt text">'
+            '<meta property="og:url" content="https://example.com/">'
+            '<meta property="og:type" content="website">'
+            '<meta name="twitter:card" content="summary">'
+        )
+        issues = crawler.detect_social_seo_issues("https://example.com/", soup)
+        types = [i["type"] for i in issues]
+        self.assertNotIn("missing_twitter_title", types)
+        self.assertNotIn("missing_twitter_description", types)
+        self.assertNotIn("missing_twitter_image", types)
+
+    def test_missing_and_invalid_twitter_card(self):
+        # Missing twitter:card
+        soup = self.make_soup(
+            '<meta property="og:title" content="A Valid Page Title Here">'
+            '<meta property="og:description" content="This is an informative page description that meets the required length threshold.">'
+            '<meta property="og:image" content="https://example.com/hero.jpg">'
+            '<meta property="og:image:alt" content="Alt">'
+            '<meta property="og:url" content="https://example.com/">'
+            '<meta property="og:type" content="website">'
+        )
+        issues = crawler.detect_social_seo_issues("https://example.com/", soup)
+        types = [i["type"] for i in issues]
+        self.assertIn("missing_twitter_card", types)
+
+        # Invalid twitter:card type
+        for bad_card in ("unsupported", "gallery", "photo", "random"):
+            soup = self.make_soup(
+                '<meta property="og:title" content="A Valid Page Title Here">'
+                '<meta property="og:description" content="This is an informative page description that meets the required length threshold.">'
+                '<meta property="og:image" content="https://example.com/hero.jpg">'
+                '<meta property="og:image:alt" content="Alt">'
+                '<meta property="og:url" content="https://example.com/">'
+                '<meta property="og:type" content="website">'
+                f'<meta name="twitter:card" content="{bad_card}">'
+            )
+            issues = crawler.detect_social_seo_issues("https://example.com/", soup)
+            types = [i["type"] for i in issues]
+            self.assertIn("invalid_twitter_card", types)
+
+        # Valid twitter:card types
+        for good_card in ("summary", "summary_large_image", "app", "player"):
+            soup = self.make_soup(
+                '<meta property="og:title" content="A Valid Page Title Here">'
+                '<meta property="og:description" content="This is an informative page description that meets the required length threshold.">'
+                '<meta property="og:image" content="https://example.com/hero.jpg">'
+                '<meta property="og:image:alt" content="Alt">'
+                '<meta property="og:url" content="https://example.com/">'
+                '<meta property="og:type" content="website">'
+                f'<meta name="twitter:card" content="{good_card}">'
+            )
+            issues = crawler.detect_social_seo_issues("https://example.com/", soup)
+            types = [i["type"] for i in issues]
+            self.assertNotIn("invalid_twitter_card", types)
+
+    def test_invalid_og_url_and_image_url(self):
+        # Relative og:url
+        soup = self.make_soup(
+            '<meta property="og:title" content="A Valid Page Title Here">'
+            '<meta property="og:description" content="This is an informative page description that meets the required length threshold.">'
+            '<meta property="og:image" content="https://example.com/hero.jpg">'
+            '<meta property="og:image:alt" content="Alt">'
+            '<meta property="og:url" content="/relative-path">'
+            '<meta property="og:type" content="website">'
+            '<meta name="twitter:card" content="summary">'
+        )
+        issues = crawler.detect_social_seo_issues("https://example.com/", soup)
+        types = [i["type"] for i in issues]
+        self.assertIn("invalid_og_url", types)
+
+        # Relative og:image
+        soup = self.make_soup(
+            '<meta property="og:title" content="A Valid Page Title Here">'
+            '<meta property="og:description" content="This is an informative page description that meets the required length threshold.">'
+            '<meta property="og:image" content="/images/hero.jpg">'
+            '<meta property="og:image:alt" content="Alt">'
+            '<meta property="og:url" content="https://example.com/">'
+            '<meta property="og:type" content="website">'
+            '<meta name="twitter:card" content="summary">'
+        )
+        issues = crawler.detect_social_seo_issues("https://example.com/", soup)
+        types = [i["type"] for i in issues]
+        self.assertIn("og_image_invalid_url", types)
+
+    def test_og_url_canonical_conflict(self):
+        soup = self.make_soup(
+            '<meta property="og:title" content="A Valid Page Title Here">'
+            '<meta property="og:description" content="This is an informative page description that meets the required length threshold.">'
+            '<meta property="og:image" content="https://example.com/hero.jpg">'
+            '<meta property="og:image:alt" content="Alt">'
+            '<meta property="og:url" content="https://example.com/page-a">'
+            '<meta property="og:type" content="website">'
+            '<meta name="twitter:card" content="summary">',
+            canonical="https://example.com/canonical-page",
+        )
+        issues = crawler.detect_social_seo_issues("https://example.com/page-a", soup)
+        types = [i["type"] for i in issues]
+        self.assertIn("og_url_canonical_conflict", types)
+
+    def test_duplicate_conflicting_og_tags(self):
+        soup = self.make_soup(
+            '<meta property="og:title" content="First Title">'
+            '<meta property="og:title" content="Conflicting Second Title">'
+            '<meta property="og:description" content="This is an informative page description that meets the required length threshold.">'
+            '<meta property="og:image" content="https://example.com/hero.jpg">'
+            '<meta property="og:image:alt" content="Alt">'
+            '<meta property="og:url" content="https://example.com/">'
+            '<meta property="og:type" content="website">'
+            '<meta name="twitter:card" content="summary">'
+        )
+        issues = crawler.detect_social_seo_issues("https://example.com/", soup)
+        types = [i["type"] for i in issues]
+        self.assertIn("duplicate_og_tags", types)
+
+    def test_empty_og_metadata(self):
+        soup = self.make_soup(
+            '<meta property="og:title" content="   ">'
+            '<meta property="og:description" content="This is an informative page description that meets the required length threshold.">'
+            '<meta property="og:image" content="https://example.com/hero.jpg">'
+            '<meta property="og:image:alt" content="Alt">'
+            '<meta property="og:url" content="https://example.com/">'
+            '<meta property="og:type" content="website">'
+            '<meta name="twitter:card" content="summary">'
+        )
+        issues = crawler.detect_social_seo_issues("https://example.com/", soup)
+        types = [i["type"] for i in issues]
+        self.assertIn("empty_og_metadata", types)
+        self.assertIn("missing_og_title", types)
+
+    def test_length_thresholds_for_title_and_description(self):
+        # Short title (< 15 chars)
+        soup = self.make_soup(
+            '<meta property="og:title" content="Short">'
+            '<meta property="og:description" content="This is an informative page description that meets the required length threshold.">'
+            '<meta property="og:image" content="https://example.com/hero.jpg">'
+            '<meta property="og:image:alt" content="Alt">'
+            '<meta property="og:url" content="https://example.com/">'
+            '<meta property="og:type" content="website">'
+            '<meta name="twitter:card" content="summary">'
+        )
+        issues = crawler.detect_social_seo_issues("https://example.com/", soup)
+        types = [i["type"] for i in issues]
+        self.assertIn("short_og_title", types)
+
+        # Long title (> 90 chars)
+        long_title = "A" * 95
+        soup = self.make_soup(
+            f'<meta property="og:title" content="{long_title}">'
+            '<meta property="og:description" content="This is an informative page description that meets the required length threshold.">'
+            '<meta property="og:image" content="https://example.com/hero.jpg">'
+            '<meta property="og:image:alt" content="Alt">'
+            '<meta property="og:url" content="https://example.com/">'
+            '<meta property="og:type" content="website">'
+            '<meta name="twitter:card" content="summary">'
+        )
+        issues = crawler.detect_social_seo_issues("https://example.com/", soup)
+        types = [i["type"] for i in issues]
+        self.assertIn("long_og_title", types)
+
+        # Short description (< 50 chars)
+        soup = self.make_soup(
+            '<meta property="og:title" content="A Valid Page Title Here">'
+            '<meta property="og:description" content="Too short desc.">'
+            '<meta property="og:image" content="https://example.com/hero.jpg">'
+            '<meta property="og:image:alt" content="Alt">'
+            '<meta property="og:url" content="https://example.com/">'
+            '<meta property="og:type" content="website">'
+            '<meta name="twitter:card" content="summary">'
+        )
+        issues = crawler.detect_social_seo_issues("https://example.com/", soup)
+        types = [i["type"] for i in issues]
+        self.assertIn("short_og_description", types)
+
+        # Long description (> 200 chars)
+        long_desc = "B" * 210
+        soup = self.make_soup(
+            '<meta property="og:title" content="A Valid Page Title Here">'
+            f'<meta property="og:description" content="{long_desc}">'
+            '<meta property="og:image" content="https://example.com/hero.jpg">'
+            '<meta property="og:image:alt" content="Alt">'
+            '<meta property="og:url" content="https://example.com/">'
+            '<meta property="og:type" content="website">'
+            '<meta name="twitter:card" content="summary">'
+        )
+        issues = crawler.detect_social_seo_issues("https://example.com/", soup)
+        types = [i["type"] for i in issues]
+        self.assertIn("long_og_description", types)
+
+    def test_social_image_missing_alt(self):
+        # Missing image alt
+        soup = self.make_soup(
+            '<meta property="og:title" content="A Valid Page Title Here">'
+            '<meta property="og:description" content="This is an informative page description that meets the required length threshold.">'
+            '<meta property="og:image" content="https://example.com/hero.jpg">'
+            '<meta property="og:url" content="https://example.com/">'
+            '<meta property="og:type" content="website">'
+            '<meta name="twitter:card" content="summary">'
+        )
+        issues = crawler.detect_social_seo_issues("https://example.com/", soup)
+        types = [i["type"] for i in issues]
+        self.assertIn("social_image_missing_alt", types)
+
+        # With og:image:alt
+        soup = self.make_soup(
+            '<meta property="og:title" content="A Valid Page Title Here">'
+            '<meta property="og:description" content="This is an informative page description that meets the required length threshold.">'
+            '<meta property="og:image" content="https://example.com/hero.jpg">'
+            '<meta property="og:image:alt" content="A nice alt text">'
+            '<meta property="og:url" content="https://example.com/">'
+            '<meta property="og:type" content="website">'
+            '<meta name="twitter:card" content="summary">'
+        )
+        issues = crawler.detect_social_seo_issues("https://example.com/", soup)
+        types = [i["type"] for i in issues]
+        self.assertNotIn("social_image_missing_alt", types)
+
+        # With twitter:image:alt
+        soup = self.make_soup(
+            '<meta property="og:title" content="A Valid Page Title Here">'
+            '<meta property="og:description" content="This is an informative page description that meets the required length threshold.">'
+            '<meta property="og:image" content="https://example.com/hero.jpg">'
+            '<meta name="twitter:image:alt" content="A twitter alt text">'
+            '<meta property="og:url" content="https://example.com/">'
+            '<meta property="og:type" content="website">'
+            '<meta name="twitter:card" content="summary">'
+        )
+        issues = crawler.detect_social_seo_issues("https://example.com/", soup)
+        types = [i["type"] for i in issues]
+        self.assertNotIn("social_image_missing_alt", types)
+
+    def test_non_html_and_empty_soup_handling(self):
+        soup = self.make_soup('<meta property="og:title" content="Title">')
+        self.assertEqual(crawler.detect_social_seo_issues("https://example.com/file.pdf", soup, content_type="application/pdf"), [])
+        self.assertEqual(crawler.detect_social_seo_issues("https://example.com/", None, content_type="text/html"), [])
+
+    def test_summarize_social_audit(self):
+        sample_pages = [
+            {
+                "url": "https://example.com/a",
+                "has_open_graph": True,
+                "has_twitter_card": True,
+                "seo_issues": [
+                    {"type": "missing_og_title", "severity": "warning"},
+                    {"type": "invalid_og_url", "severity": "error"},
+                    {"type": "social_image_missing_alt", "severity": "info"},
+                ],
+            },
+            {
+                "url": "https://example.com/b",
+                "has_open_graph": False,
+                "has_twitter_card": False,
+                "seo_issues": [],
+            },
+        ]
+        summary = crawler.summarize_social_audit(sample_pages)
+        self.assertEqual(summary["pages_with_og_count"], 1)
+        self.assertEqual(summary["pages_with_twitter_card_count"], 1)
+        self.assertEqual(summary["missing_required_og_count"], 1)
+        self.assertEqual(summary["invalid_social_metadata_count"], 1)
+        self.assertEqual(summary["total_social_issues"], 3)
+        self.assertEqual(summary["severity_counts"]["error"], 1)
+        self.assertEqual(summary["severity_counts"]["warning"], 1)
+        self.assertEqual(summary["severity_counts"]["info"], 1)
+
+    def test_crawl_website_populates_social_fields(self):
+        url = "https://example.com/social"
+        html = (
+            '<!DOCTYPE html><html lang="en"><head>'
+            '<title>Social Page</title>'
+            '<meta name="description" content="A valid description of the social page for search results.">'
+            f'<link rel="canonical" href="{url}">'
+            '<script type="application/ld+json">{"@context":"https://schema.org","@type":"WebPage"}</script>'
+            '<meta property="og:title" content="A Valid Page Title Here">'
+            '<meta property="og:description" content="This is an informative page description that meets the required length threshold.">'
+            '<meta property="og:image" content="https://example.com/hero.jpg">'
+            '<meta property="og:image:alt" content="A descriptive image alt text">'
+            f'<meta property="og:url" content="{url}">'
+            '<meta property="og:type" content="website">'
+            '<meta name="twitter:card" content="summary_large_image">'
+            f'</head><body><main><h1>Social Page</h1><p>{DEFAULT_BODY_WORDS}</p></main></body></html>'
+        )
+
+        def fake_get(target_url, **_):
+            if target_url.endswith("/robots.txt"):
+                return make_response("GET", target_url, 200, ROBOTS_TXT)
+            if target_url.endswith("/sitemap.xml"):
+                return make_sitemap_response(target_url, (url,))
+            return make_response("GET", target_url, 200, html, content_type="text/html; charset=utf-8")
+
+        with patch("crawler.httpx.get", side_effect=fake_get), \
+             patch("crawler.httpx.head", return_value=make_response("HEAD", url, 200)), \
+             patch("crawler.time.sleep"):
+            pages = crawler.crawl_website(url, max_pages=1, max_depth=0)
+
+        self.assertEqual(len(pages), 1)
+        page = pages[0]
+        self.assertTrue(page["has_open_graph"])
+        self.assertTrue(page["has_twitter_card"])
+        social_issues = [i for i in page["seo_issues"] if i["type"] in crawler.SOCIAL_ISSUE_TYPES]
+        self.assertEqual(social_issues, [])
 
 
 if __name__ == "__main__":
