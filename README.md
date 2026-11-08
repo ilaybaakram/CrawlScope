@@ -1,26 +1,193 @@
 # CrawlScope
 
-**CrawlScope** is a comprehensive website auditing and intelligence platform designed to crawl websites, analyze technical health, and surface actionable insights across SEO, performance, security, and site architecture.
+**CrawlScope** is an open-source website auditing and technical intelligence platform. It crawls web applications, systematically analyzes technical health across 9 auditing dimensions, calculates an overall Site Health Score (0–100), and delivers actionable recommendations through an interactive web dashboard and flexible export options (CSV & JSON).
 
-## Purpose
+---
 
-Modern websites require continuous monitoring and deep structural analysis to stay fast, accessible, search-engine friendly, and secure. CrawlScope provides an automated, extensible platform to inspect web properties at scale and turn raw crawl data into clear engineering and growth diagnostics.
+## Key Capabilities & Features
 
-## Planned Features
+### 1. Robust Web Crawler
+- **Configurable Crawl Boundaries**: Control crawl limits via maximum page count (1–100), maximum link depth (0–5), and politeness delay intervals (0.5–10s).
+- **Safety & SSRF Protection**: Built-in safeguards prevent requests to loopback addresses (`localhost`, `127.0.0.1`), private RFC 1918 subnets, link-local addresses, and cloud metadata endpoints.
+- **Protocol & Network Resilience**: Handles network timeouts, TLS/SSL verification errors, redirect chains, and HTTP errors gracefully.
 
-- **Intelligent Web Crawler**: Configurable site crawling with depth control, robots.txt compliance, and rate limiting.
-- **Technical SEO Auditing**: Detection of broken links, redirect chains, missing metadata, canonical issues, and indexability problems.
-- **Performance & Core Metrics**: Page load diagnostics, asset weight analysis, and response time tracking.
-- **Security & Header Inspection**: Evaluation of HTTPS configuration, security headers (CSP, HSTS, X-Frame-Options), and mixed content.
-- **Content & Structure Intelligence**: Site architecture visualization, internal link graph analysis, and content quality signals.
-- **Interactive Dashboard**: Rich visual reporting, historical audit comparisons, and exportable insights.
+### 2. Comprehensive 9-Category SEO & Technical Audit
+CrawlScope executes automated, deterministic audit checks across nine core categories:
 
-## Technology Stack
+1. **Technical SEO**: Missing titles, duplicated titles, long/short titles, missing meta descriptions, duplicate descriptions, canonical tag validation, canonical loops, and indexability conflicts.
+2. **Content Quality & Readability**: Primary H1 checks, heading hierarchy (H1–H6), heading repetition, content-heading mismatch heuristics, keyword stuffing detection, and Flesch reading ease scoring.
+3. **Crawlability & Internal Linking**: Orphan pages, low internal link counts, deep pages (> 4 levels), `rel="nofollow"` links, and nofollow page directives.
+4. **Sitemap & Robots.txt**: XML sitemap discovery (`/sitemap.xml`, robots.txt references), sitemap parsing, uncrawled sitemap URLs, missing crawled URLs from sitemap, noncanonical sitemap targets, and conflicting robots.txt directives.
+5. **Security & HTTPS**: Insecure HTTP pages, internal HTTP links on HTTPS sites, mixed active/passive content (images, scripts, styles, iframes), insecure form `action` targets, and missing HTTP security headers (`Strict-Transport-Security`, `Content-Security-Policy`, `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Permissions-Policy`).
+6. **External Link & Outbound Safety**: Broken external links (4xx/5xx), external redirects, timeouts, SSL validation failures, and `target="_blank"` safety without `rel="noopener noreferrer"`.
+7. **International SEO & Hreflang**: Missing hreflang on multilingual sites, invalid ISO 639-1 language or ISO 3166-1 alpha-2 region codes, missing reciprocal return links, uncrawled targets, and canonical conflicts.
+8. **Social Sharing & Open Graph**: Missing Open Graph tags (`og:title`, `og:description`, `og:image`, `og:url`, `og:type`), Twitter Card tags, malformed social image URLs, and canonical mismatches.
+9. **Accessibility & Usability**: Missing image alt text, empty button labels, empty anchor tags, missing form field labels, missing page language attributes, duplicate element IDs, and viewport configuration.
 
-- **Backend**: Python, FastAPI
-- **Frontend**: React
-- **Architecture**: Modular auditing engine and RESTful API designed to expand with background task processing, persistent storage, and real-time crawl telemetry.
+### 3. Site Health Scoring Engine
+- **Deterministic 0–100 Health Score**: Evaluates severity-weighted deductions (`error`: -5 pts, `warning`: -2 pts, `info`: -0.5 pts) with per-page normalization across active categories.
+- **Health Rating Tiers**: Clear qualitative classification:
+  - **90–100**: *Excellent*
+  - **75–89.9**: *Good*
+  - **50–74.9**: *Fair*
+  - **0–49.9**: *Poor*
+- **Prioritized Actionable Findings**: Automatically aggregates and ranks issues by impact and frequency to provide high-leverage fixes first.
 
-## Getting Started
+### 4. Interactive Dashboard & UI/UX
+- **Visual Overview Cards**: Quick metrics on total pages crawled, links checked, broken links, and site health rating.
+- **Jump Navigation**: Sticky section navigation for fast jumping across Crawl Settings, Site Health, Top Findings, Crawled Pages, SEO Audit, Broken Links, and History.
+- **Client-Side Search & Filtering**: Real-time filtering by status codes (2xx, 3xx, errors), severity levels (error, warning, info), and text searches across URLs, titles, and messages.
+- **Persistent Session History**: Local browser persistence for previous crawl runs with one-click URL re-loading.
+- **Data Exporting**: Instant browser downloads for Pages CSV/JSON, Link Results CSV/JSON, and Site Health Summary JSON.
 
-_Project setup instructions for the FastAPI backend and React frontend will be added as the core services are implemented._
+---
+
+## Tech Stack
+
+- **Backend**: Python 3.11+, [FastAPI](https://fastapi.tiangolo.com/), [Uvicorn](https://www.uvicorn.org/), [BeautifulSoup4](https://www.crummy.com/software/BeautifulSoup/), [Requests](https://requests.readthedocs.io/)
+- **Frontend**: [React 18](https://react.dev/), [Vite](https://vitejs.dev/), vanilla CSS with responsive layouts
+- **Testing**: Python standard `unittest` library (220+ comprehensive automated tests)
+
+---
+
+## Project Structure
+
+```
+CrawlScope/
+├── crawler.py           # Core crawl engine, audit checks, scoring, and data aggregation
+├── exporter.py          # CSV and JSON export routines
+├── main.py              # FastAPI REST API endpoints, CORS, and server entrypoint
+├── requirements.txt     # Python production and development dependencies
+├── tests/               # Python unit and integration test suite
+│   ├── test_crawler.py
+│   ├── test_exporter.py
+│   ├── test_main.py
+│   └── ...
+├── frontend/            # React + Vite frontend application
+│   ├── src/
+│   │   ├── App.jsx      # Dashboard component, data tables, and state management
+│   │   ├── App.css      # Design system, cards, tables, badges, and responsive styles
+│   │   └── main.jsx     # Frontend entrypoint
+│   ├── package.json
+│   └── vite.config.js
+└── README.md
+```
+
+---
+
+## Local Development Setup
+
+### Prerequisites
+- **Python**: Version 3.11 or higher
+- **Node.js**: Version 18.0 or higher (with `npm`)
+
+### 1. Backend Setup
+1. Create and activate a Python virtual environment:
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+   ```
+2. Install Python dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+3. Run the backend API server:
+   ```bash
+   uvicorn main:app --reload --port 8000
+   ```
+   *Alternative:* Run directly with Python:
+   ```bash
+   python main.py
+   ```
+   The API will be available at `http://127.0.0.1:8000`. You can test the health endpoint at:
+   ```bash
+   curl http://127.0.0.1:8000/api/health
+   ```
+
+### 2. Frontend Setup
+1. Navigate to the `frontend` folder and install dependencies:
+   ```bash
+   cd frontend
+   npm install
+   ```
+2. Start the Vite development server:
+   ```bash
+   npm run dev
+   ```
+   Open your browser at `http://localhost:5173`.
+
+---
+
+## Running Automated Tests
+
+Run the complete Python test suite:
+```bash
+.venv/bin/python -m unittest discover -s tests -v
+```
+
+Run frontend production build verification:
+```bash
+npm --prefix frontend run build
+```
+
+---
+
+## Environment Variables
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `PORT` | `8000` | Port for the FastAPI Uvicorn server in production. |
+| `CORS_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173` | Comma-separated list of allowed frontend origins for CORS. |
+| `VITE_API_BASE_URL` | `http://127.0.0.1:8000` | (Frontend build-time) Base URL of the backend API. |
+
+---
+
+## Deployment Architectures
+
+### Option A: Cloud PaaS (FastAPI) + Static Hosting (React) *(Recommended)*
+
+1. **Backend on Render / Railway / Fly.io**:
+   - Build command: `pip install -r requirements.txt`
+   - Start command: `python main.py` or `uvicorn main:app --host 0.0.0.0 --port $PORT`
+   - Set environment variables:
+     - `PORT`: (Set automatically by platform)
+     - `CORS_ORIGINS`: `https://your-frontend-domain.vercel.app`
+2. **Frontend on Vercel / Netlify / Cloudflare Pages**:
+   - Framework preset: `Vite`
+   - Root directory: `frontend`
+   - Build command: `npm run build`
+   - Output directory: `dist`
+   - Set environment variable:
+     - `VITE_API_BASE_URL`: `https://your-backend-domain.onrender.com`
+
+### Option B: Unified Docker Container
+
+A multi-stage Docker build can compile the Vite frontend and serve both the API and static assets from FastAPI:
+
+```dockerfile
+# Stage 1: Build Frontend
+FROM node:20-alpine AS frontend-builder
+WORKDIR /app/frontend
+COPY frontend/package*.json ./
+RUN npm ci
+COPY frontend/ ./
+ARG VITE_API_BASE_URL=""
+RUN npm run build
+
+# Stage 2: Python Backend
+FROM python:3.11-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+COPY --from=frontend-builder /app/frontend/dist /app/frontend/dist
+ENV PORT=8000
+EXPOSE 8000
+CMD ["python", "main.py"]
+```
+
+---
+
+## License
+
+This project is licensed under the MIT License.

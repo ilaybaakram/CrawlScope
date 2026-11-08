@@ -191,6 +191,22 @@ class FastAPIEndpointTests(unittest.TestCase):
             },
         )
 
+    def test_crawl_failure_returns_500_with_detail(self) -> None:
+        with patch("main.crawl_website", side_effect=RuntimeError("Connection aborted by remote host")):
+            response = self.client.post(
+                "/crawl",
+                json={
+                    "start_url": "https://example.com/",
+                    "max_pages": 5,
+                    "max_depth": 1,
+                    "delay_seconds": 1.0,
+                },
+            )
+        self.assertEqual(response.status_code, 500)
+        data = response.json()
+        self.assertIn("detail", data)
+        self.assertIn("Crawl failed: Connection aborted by remote host", data["detail"])
+
     def test_health_endpoint(self) -> None:
         response = self.client.get("/health")
         self.assertEqual(response.status_code, 200)

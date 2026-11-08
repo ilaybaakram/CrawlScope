@@ -1,7 +1,8 @@
+import os
 from typing import Any
 from urllib.parse import urlparse
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 
@@ -16,14 +17,22 @@ from crawler import (
     summarize_social_audit,
 )
 
-app = FastAPI()
+app = FastAPI(title="CrawlScope API", version="0.1.0")
+
+cors_origins_env = os.getenv("CORS_ORIGINS", "")
+allowed_origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
+if cors_origins_env:
+    for origin in cors_origins_env.split(","):
+        cleaned = origin.strip()
+        if cleaned and cleaned not in allowed_origins:
+            allowed_origins.append(cleaned)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
@@ -66,25 +75,37 @@ def health_check():
 
 @app.post("/crawl")
 def run_crawl(request: CrawlRequest) -> dict[str, Any]:
-    links: list[dict[str, Any]] = []
-    pages = crawl_website(
-        start_url=request.start_url,
-        max_pages=request.max_pages,
-        delay_seconds=request.delay_seconds,
-        max_depth=request.max_depth,
-        link_results=links,
-    )
-    return {
-        "start_url": request.start_url,
-        "pages_crawled": len(pages),
-        "links_checked": len(links),
-        "sitemap_coverage": summarize_sitemap_coverage(pages),
-        "security_summary": summarize_security_audit(pages),
-        "external_link_summary": summarize_external_links(pages),
-        "hreflang_summary": summarize_hreflang_audit(pages),
-        "social_summary": summarize_social_audit(pages),
-        "readability_summary": summarize_readability_audit(pages),
-        "site_health_summary": calculate_site_health_summary(pages),
-        "pages": pages,
-        "links": links,
-    }
+    try:
+        links: list[dict[str, Any]] = []
+        pages = crawl_website(
+            start_url=request.start_url,
+            max_pages=request.max_pages,
+            delay_seconds=request.delay_seconds,
+            max_depth=request.max_depth,
+            link_results=links,
+        )
+        return {
+            "start_url": request.start_url,
+            "pages_crawled": len(pages),
+            "links_checked": len(links),
+            "sitemap_coverage": summarize_sitemap_coverage(pages),
+            "security_summary": summarize_security_audit(pages),
+            "external_link_summary": summarize_external_links(pages),
+            "hreflang_summary": summarize_hreflang_audit(pages),
+            "social_summary": summarize_social_audit(pages),
+            "readability_summary": summarize_readability_audit(pages),
+            "site_health_summary": calculate_site_health_summary(pages),
+            "pages": pages,
+            "links": links,
+        }
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Crawl failed: {str(exc)}",
+        ) from exc
+
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)

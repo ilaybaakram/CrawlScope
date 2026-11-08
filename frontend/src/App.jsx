@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useMemo } from "react";
 import "./App.css";
 
 const API_BASE_URL =
@@ -198,7 +198,52 @@ function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
   const [crawlData, setCrawlData] = useState(null);
-  const [crawlHistory, setCrawlHistory] = useState([]);
+  const [crawlHistory, setCrawlHistory] = useState(() => {
+    try {
+      const stored = localStorage.getItem("crawlscope_history");
+      return stored ? JSON.parse(stored) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  const [pageSearch, setPageSearch] = useState("");
+  const [pageStatusFilter, setPageStatusFilter] = useState("all");
+  const [pageSortField, setPageSortField] = useState("url");
+  const [pageSortDir, setPageSortDir] = useState("asc");
+
+  const [issueSearch, setIssueSearch] = useState("");
+  const [issueSeverityFilter, setIssueSeverityFilter] = useState("all");
+
+  const [brokenLinkSearch, setBrokenLinkSearch] = useState("");
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        "crawlscope_history",
+        JSON.stringify(crawlHistory.slice(0, 50))
+      );
+    } catch {
+      // ignore
+    }
+  }, [crawlHistory]);
+
+  function handleLoadHistoryUrl(url) {
+    setStartUrl(url);
+    const formEl = document.getElementById("crawl-form");
+    if (formEl) {
+      formEl.scrollIntoView({ behavior: "smooth" });
+    }
+  }
+
+  function handleClearHistory() {
+    setCrawlHistory([]);
+    try {
+      localStorage.removeItem("crawlscope_history");
+    } catch {
+      // ignore
+    }
+  }
 
   async function handleStartCrawl(event) {
     event.preventDefault();
@@ -268,6 +313,67 @@ function App() {
   const seoIssues = pages.flatMap((page) =>
     Array.isArray(page.seo_issues) ? page.seo_issues : []
   );
+
+  const filteredAndSortedPages = useMemo(() => {
+    return pages
+      .filter((page) => {
+        if (pageStatusFilter === "2xx") {
+          if (!page.status_code || page.status_code < 200 || page.status_code >= 300) return false;
+        } else if (pageStatusFilter === "3xx") {
+          if (!page.status_code || page.status_code < 300 || page.status_code >= 400) return false;
+        } else if (pageStatusFilter === "errors") {
+          if (!page.status_code || page.status_code < 400) return false;
+        }
+        if (pageSearch.trim()) {
+          const q = pageSearch.toLowerCase().trim();
+          const matchUrl = typeof page.url === "string" && page.url.toLowerCase().includes(q);
+          const matchTitle = typeof page.title === "string" && page.title.toLowerCase().includes(q);
+          const matchH1 = typeof page.h1 === "string" && page.h1.toLowerCase().includes(q);
+          if (!matchUrl && !matchTitle && !matchH1) return false;
+        }
+        return true;
+      })
+      .sort((a, b) => {
+        let valA = a[pageSortField];
+        let valB = b[pageSortField];
+        if (valA === null || valA === undefined) valA = pageSortDir === "asc" ? Infinity : -Infinity;
+        if (valB === null || valB === undefined) valB = pageSortDir === "asc" ? Infinity : -Infinity;
+        if (typeof valA === "string") valA = valA.toLowerCase();
+        if (typeof valB === "string") valB = valB.toLowerCase();
+        if (valA < valB) return pageSortDir === "asc" ? -1 : 1;
+        if (valA > valB) return pageSortDir === "asc" ? 1 : -1;
+        return 0;
+      });
+  }, [pages, pageSearch, pageStatusFilter, pageSortField, pageSortDir]);
+
+  const filteredSeoIssues = useMemo(() => {
+    return seoIssues.filter((issue) => {
+      if (issueSeverityFilter !== "all" && issue.severity !== issueSeverityFilter) {
+        return false;
+      }
+      if (issueSearch.trim()) {
+        const q = issueSearch.toLowerCase().trim();
+        const matchType = typeof issue.type === "string" && issue.type.toLowerCase().includes(q);
+        const matchUrl = typeof issue.url === "string" && issue.url.toLowerCase().includes(q);
+        const matchMsg = typeof issue.message === "string" && issue.message.toLowerCase().includes(q);
+        if (!matchType && !matchUrl && !matchMsg) return false;
+      }
+      return true;
+    });
+  }, [seoIssues, issueSeverityFilter, issueSearch]);
+
+  const filteredBrokenLinks = useMemo(() => {
+    return brokenLinks.filter((link) => {
+      if (brokenLinkSearch.trim()) {
+        const q = brokenLinkSearch.toLowerCase().trim();
+        const matchUrl = typeof link.url === "string" && link.url.toLowerCase().includes(q);
+        const matchFoundOn = typeof link.found_on === "string" && link.found_on.toLowerCase().includes(q);
+        const matchError = typeof link.error === "string" && link.error.toLowerCase().includes(q);
+        if (!matchUrl && !matchFoundOn && !matchError) return false;
+      }
+      return true;
+    });
+  }, [brokenLinks, brokenLinkSearch]);
   const sitemapCoverage = crawlData?.sitemap_coverage || {
     sitemap_urls_count: pages.filter((p) => p.in_sitemap).length,
     crawled_urls_count: pages.length,
@@ -517,7 +623,17 @@ function App() {
         <span className="api-badge">API: {API_BASE_URL}</span>
       </header>
 
-      <section className="card">
+      <nav className="dashboard-nav" aria-label="Dashboard Sections">
+        <a href="#crawl-form" className="nav-pill">Crawl Settings</a>
+        <a href="#site-health" className="nav-pill">Site Health</a>
+        <a href="#prioritized-findings" className="nav-pill">Top Findings</a>
+        <a href="#crawled-pages" className="nav-pill">Pages ({pages.length})</a>
+        <a href="#seo-issues" className="nav-pill">SEO Audit ({seoIssues.length})</a>
+        <a href="#broken-links" className="nav-pill">Broken Links ({brokenLinks.length})</a>
+        <a href="#session-history" className="nav-pill">History ({crawlHistory.length})</a>
+      </nav>
+
+      <section className="card" id="crawl-form">
         <h2>Crawl Configuration</h2>
         <form className="crawl-form" onSubmit={handleStartCrawl}>
           <div className="form-group form-group-url">
@@ -622,7 +738,7 @@ function App() {
         </div>
       </section>
 
-      <section className="card site-health-card">
+      <section className="card site-health-card" id="site-health">
         <div className="section-header">
           <h2>Site Health &amp; Audit Overview</h2>
           <span className="section-hint">
@@ -720,14 +836,14 @@ function App() {
         </div>
       </section>
 
-      {crawlData && (siteHealth.prioritized_issues || []).length > 0 && (
-        <section className="card">
-          <div className="section-header">
-            <h2>Prioritized Actionable Findings</h2>
-            <span className="section-hint">
-              Top recommendations ranked by severity and site-wide impact
-            </span>
-          </div>
+      <section className="card" id="prioritized-findings">
+        <div className="section-header">
+          <h2>Prioritized Actionable Findings</h2>
+          <span className="section-hint">
+            Top recommendations ranked by severity and site-wide impact
+          </span>
+        </div>
+        {crawlData && (siteHealth.prioritized_issues || []).length > 0 ? (
           <div className="prioritized-issues-list">
             {(siteHealth.prioritized_issues || []).slice(0, 8).map((issue) => (
               <div key={issue.issue_type} className="prioritized-issue-item">
@@ -755,8 +871,14 @@ function App() {
               </div>
             ))}
           </div>
-        </section>
-      )}
+        ) : (
+          <p className="empty-state">
+            {crawlData
+              ? "No priority actionable issues found. All audited categories are healthy!"
+              : "Priority recommendations ranked by severity and impact will appear here after a crawl."}
+          </p>
+        )}
+      </section>
 
       <section className="card">
         <div className="section-header">
@@ -1062,13 +1184,73 @@ function App() {
         </div>
       </section>
 
-      <section className="card">
-        <h2>Crawled Pages ({pages.length})</h2>
+      <section className="card" id="crawled-pages">
+        <div className="section-header">
+          <h2>Crawled Pages ({pages.length})</h2>
+          {pages.length > 0 && (
+            <span className="toolbar-count">
+              Showing {filteredAndSortedPages.length} of {pages.length} pages
+            </span>
+          )}
+        </div>
+
+        {pages.length > 0 && (
+          <div className="table-toolbar">
+            <div className="toolbar-controls">
+              <input
+                type="text"
+                className="toolbar-input"
+                placeholder="Search URL, title, H1..."
+                value={pageSearch}
+                onChange={(e) => setPageSearch(e.target.value)}
+                aria-label="Search pages"
+              />
+              <select
+                className="toolbar-select"
+                value={pageStatusFilter}
+                onChange={(e) => setPageStatusFilter(e.target.value)}
+                aria-label="Filter by status"
+              >
+                <option value="all">All Status Codes</option>
+                <option value="2xx">2xx Success</option>
+                <option value="3xx">3xx Redirects</option>
+                <option value="errors">4xx / 5xx Errors</option>
+              </select>
+              <select
+                className="toolbar-select"
+                value={pageSortField}
+                onChange={(e) => setPageSortField(e.target.value)}
+                aria-label="Sort pages by"
+              >
+                <option value="url">Sort: URL</option>
+                <option value="depth">Sort: Depth</option>
+                <option value="status_code">Sort: Status</option>
+                <option value="response_time_ms">Sort: Response Time</option>
+                <option value="page_size_bytes">Sort: Page Size</option>
+                <option value="readability_score">Sort: Readability</option>
+              </select>
+              <select
+                className="toolbar-select"
+                value={pageSortDir}
+                onChange={(e) => setPageSortDir(e.target.value)}
+                aria-label="Sort direction"
+              >
+                <option value="asc">Ascending</option>
+                <option value="desc">Descending</option>
+              </select>
+            </div>
+          </div>
+        )}
+
         {pages.length === 0 ? (
           <p className="empty-state">
             {crawlData
               ? "No pages were returned for this crawl."
               : "Submit a URL above and click Start Crawl to inspect pages."}
+          </p>
+        ) : filteredAndSortedPages.length === 0 ? (
+          <p className="empty-state">
+            No pages match your search or filter criteria.
           </p>
         ) : (
           <div className="table-wrapper">
@@ -1097,7 +1279,7 @@ function App() {
                 </tr>
               </thead>
               <tbody>
-                {pages.map((page) => (
+                {filteredAndSortedPages.map((page) => (
                   <tr key={page.url}>
                     <td className="url-cell">
                       <a
@@ -1231,7 +1413,7 @@ function App() {
         )}
       </section>
 
-      <section className="card">
+      <section className="card" id="seo-issues">
         <div className="section-header">
           <h2>SEO Audit ({seoIssues.length})</h2>
           <div className="seo-metrics">
@@ -1241,13 +1423,49 @@ function App() {
             <span className="metric-badge">
               Pages with Issues: <strong>{pagesWithSeoIssues.length}</strong>
             </span>
+            {seoIssues.length > 0 && (
+              <span className="toolbar-count">
+                Showing {filteredSeoIssues.length} of {seoIssues.length} findings
+              </span>
+            )}
           </div>
         </div>
+
+        {seoIssues.length > 0 && (
+          <div className="table-toolbar">
+            <div className="toolbar-controls">
+              <input
+                type="text"
+                className="toolbar-input"
+                placeholder="Search type, URL, message..."
+                value={issueSearch}
+                onChange={(e) => setIssueSearch(e.target.value)}
+                aria-label="Search SEO issues"
+              />
+              <select
+                className="toolbar-select"
+                value={issueSeverityFilter}
+                onChange={(e) => setIssueSeverityFilter(e.target.value)}
+                aria-label="Filter by severity"
+              >
+                <option value="all">All Severities</option>
+                <option value="error">Errors only</option>
+                <option value="warning">Warnings only</option>
+                <option value="info">Info / Notices only</option>
+              </select>
+            </div>
+          </div>
+        )}
+
         {seoIssues.length === 0 ? (
           <p className="empty-state">
             {crawlData
               ? "No SEO or accessibility issues detected in this crawl."
               : "SEO, content, performance, and accessibility audit issues will appear here after a crawl."}
+          </p>
+        ) : filteredSeoIssues.length === 0 ? (
+          <p className="empty-state">
+            No SEO issues match your search or filter criteria.
           </p>
         ) : (
           <div className="table-wrapper">
@@ -1280,7 +1498,7 @@ function App() {
                 </tr>
               </thead>
               <tbody>
-                {seoIssues.map((issue, index) => (
+                {filteredSeoIssues.map((issue, index) => (
                   <tr
                     key={`${issue.url}-${issue.type}-${index}-${issue.message || ""}-${issue.canonical_url || ""}-${issue.robots_directive || ""}-${issue.directive_source || ""}-${Array.isArray(issue.schema_types) ? issue.schema_types.join(",") : ""}-${issue.word_count ?? ""}-${issue.response_time_ms ?? ""}-${issue.page_size_bytes ?? ""}-${issue.image_url || ""}-${issue.source_url || ""}`}
                   >
@@ -1506,13 +1724,40 @@ function App() {
         )}
       </section>
 
-      <section className="card">
-        <h2>Broken Links ({brokenLinks.length})</h2>
+      <section className="card" id="broken-links">
+        <div className="section-header">
+          <h2>Broken Links ({brokenLinks.length})</h2>
+          {brokenLinks.length > 0 && (
+            <span className="toolbar-count">
+              Showing {filteredBrokenLinks.length} of {brokenLinks.length} links
+            </span>
+          )}
+        </div>
+
+        {brokenLinks.length > 0 && (
+          <div className="table-toolbar">
+            <div className="toolbar-controls">
+              <input
+                type="text"
+                className="toolbar-input"
+                placeholder="Search broken URL, source page, error..."
+                value={brokenLinkSearch}
+                onChange={(e) => setBrokenLinkSearch(e.target.value)}
+                aria-label="Search broken links"
+              />
+            </div>
+          </div>
+        )}
+
         {brokenLinks.length === 0 ? (
           <p className="empty-state">
             {crawlData
               ? "No broken links detected in this crawl."
               : "Broken or unreachable links will appear here after a crawl."}
+          </p>
+        ) : filteredBrokenLinks.length === 0 ? (
+          <p className="empty-state">
+            No broken links match your search query.
           </p>
         ) : (
           <div className="table-wrapper">
@@ -1527,7 +1772,7 @@ function App() {
                 </tr>
               </thead>
               <tbody>
-                {brokenLinks.map((link) => (
+                {filteredBrokenLinks.map((link) => (
                   <tr key={`${link.found_on}-${link.url}`}>
                     <td className="url-cell">
                       <a
@@ -1554,14 +1799,14 @@ function App() {
         )}
       </section>
 
-      <section className="card">
+      <section className="card" id="session-history">
         <div className="section-header">
           <h2>Session Crawl History ({crawlHistory.length})</h2>
           {crawlHistory.length > 0 && (
             <button
               type="button"
               className="clear-button"
-              onClick={() => setCrawlHistory([])}
+              onClick={handleClearHistory}
             >
               Clear History
             </button>
@@ -1582,6 +1827,7 @@ function App() {
                   <th>Pages Crawled</th>
                   <th>Links Checked</th>
                   <th>Broken Links</th>
+                  <th>Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -1609,6 +1855,15 @@ function App() {
                       >
                         {entry.broken_links}
                       </span>
+                    </td>
+                    <td>
+                      <button
+                        type="button"
+                        className="action-button"
+                        onClick={() => handleLoadHistoryUrl(entry.start_url)}
+                      >
+                        Load URL
+                      </button>
                     </td>
                   </tr>
                 ))}
