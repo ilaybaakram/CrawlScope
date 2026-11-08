@@ -17,6 +17,7 @@ PAGE_FIELDS = [
     "content_type",
     "response_time_ms",
     "page_size_bytes",
+    "in_sitemap",
     "seo_issues",
     "error",
 ]

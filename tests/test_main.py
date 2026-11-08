@@ -15,6 +15,7 @@ SAMPLE_PAGE = {
     "total_links": 1,
     "incoming_internal_links": 0,
     "outgoing_internal_links": 1,
+    "in_sitemap": True,
     "content_type": "text/html",
     "response_time_ms": 2300.0,
     "page_size_bytes": 1572864,
@@ -118,6 +119,15 @@ SAMPLE_PAGE = {
             "outgoing_internal_links": 1,
             "depth": 0,
         },
+        {
+            "type": "sitemap_url_not_crawled",
+            "severity": "info",
+            "message": "1 URL(s) listed in the XML sitemap were not discovered or crawled during the crawl: https://example.com/uncrawled",
+            "url": "https://example.com/",
+            "sitemap_url": "https://example.com/sitemap.xml",
+            "sitemap_urls": ["https://example.com/uncrawled"],
+            "sitemap_not_crawled_count": 1,
+        },
     ],
     "error": None,
 }
@@ -182,6 +192,15 @@ class FastAPIEndpointTests(unittest.TestCase):
         self.assertEqual(data["start_url"], "https://example.com/")
         self.assertEqual(data["pages_crawled"], 1)
         self.assertEqual(data["links_checked"], 1)
+        self.assertEqual(
+            data["sitemap_coverage"],
+            {
+                "sitemap_urls_count": 2,
+                "crawled_urls_count": 1,
+                "missing_from_sitemap_count": 0,
+                "sitemap_not_crawled_count": 1,
+            },
+        )
         self.assertEqual(data["pages"], [SAMPLE_PAGE])
         self.assertEqual(
             [issue["type"] for issue in data["pages"][0]["seo_issues"]],
@@ -199,6 +218,7 @@ class FastAPIEndpointTests(unittest.TestCase):
                 "slow_response",
                 "missing_lang",
                 "nofollow_internal_link",
+                "sitemap_url_not_crawled",
             ],
         )
         self.assertEqual(

@@ -7,7 +7,11 @@ import crawler
 
 START_URL = "https://example.com/"
 
-ROBOTS_TXT = "User-agent: *\nDisallow: /private\n"
+ROBOTS_TXT = (
+    "User-agent: *\n"
+    "Disallow: /private\n"
+    "Sitemap: https://example.com/sitemap.xml\n"
+)
 
 DEFAULT_BODY_WORDS = " ".join(f"word{i}" for i in range(550))
 SECOND_BODY_WORDS = " ".join(f"secondword{i}" for i in range(550))
@@ -27,12 +31,45 @@ START_HTML = """
 """
 
 
-def make_response(method: str, url: str, status: int, text: str = "") -> httpx.Response:
+from xml.sax.saxutils import escape as xml_escape
+
+
+def make_response(
+    method: str,
+    url: str,
+    status: int,
+    text: str = "",
+    content_type: str = "text/html",
+    location: str | None = None,
+) -> httpx.Response:
+    headers = {"content-type": content_type}
+    if location is not None:
+        headers["location"] = location
     return httpx.Response(
         status,
         text=text,
-        headers={"content-type": "text/html"},
+        headers=headers,
         request=httpx.Request(method, url),
+    )
+
+
+def make_sitemap_response(
+    url: str,
+    loc_urls: list[str] | tuple[str, ...] | set[str] = (START_URL,),
+    status: int = 200,
+) -> httpx.Response:
+    entries = "".join(f"<url><loc>{xml_escape(u)}</loc></url>" for u in loc_urls)
+    xml_text = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+        f"{entries}"
+        "</urlset>"
+    )
+    return httpx.Response(
+        status,
+        text=xml_text,
+        headers={"content-type": "application/xml"},
+        request=httpx.Request("GET", url),
     )
 
 
@@ -80,6 +117,8 @@ class CrawlLinkCheckTests(unittest.TestCase):
             get_calls.append(url)
             if url.endswith("/robots.txt"):
                 return make_response("GET", url, 200, ROBOTS_TXT)
+            if url.endswith("/sitemap.xml"):
+                return make_sitemap_response(url, (START_URL,))
             return make_response("GET", url, 200, START_HTML)
 
         head_statuses = {
@@ -135,7 +174,11 @@ class CrawlLinkCheckTests(unittest.TestCase):
         pages, _, get_calls, _ = self.run_crawl(max_pages=1, max_depth=0)
 
         self.assertEqual(len(pages), 1)
-        page_fetches = [url for url in get_calls if not url.endswith("/robots.txt")]
+        page_fetches = [
+            url
+            for url in get_calls
+            if not url.endswith(("/robots.txt", "/sitemap.xml"))
+        ]
         self.assertEqual(page_fetches, [START_URL])
 
     def test_max_link_checks_limits_requests(self):
@@ -172,6 +215,8 @@ class SeoAuditTests(unittest.TestCase):
         def fake_get(url, **_):
             if url.endswith("/robots.txt"):
                 return make_response("GET", url, 200, ROBOTS_TXT)
+            if url.endswith("/sitemap.xml"):
+                return make_sitemap_response(url, (START_URL,))
             return httpx.Response(
                 200,
                 text=html,
@@ -290,6 +335,11 @@ class DuplicateSeoAuditTests(unittest.TestCase):
         def fake_get(url, **_):
             if url.endswith("/robots.txt"):
                 return make_response("GET", url, 200, ROBOTS_TXT)
+            if url.endswith("/sitemap.xml"):
+                sm_urls = [START_URL]
+                if second_status == 200 and "text/html" in second_content_type:
+                    sm_urls.append(page_two_url)
+                return make_sitemap_response(url, sm_urls)
             if url == START_URL:
                 return httpx.Response(
                     200,
@@ -459,6 +509,8 @@ class ImageSeoAuditTests(unittest.TestCase):
         def fake_get(url, **_):
             if url.endswith("/robots.txt"):
                 return make_response("GET", url, 200, ROBOTS_TXT)
+            if url.endswith("/sitemap.xml"):
+                return make_sitemap_response(url, (START_URL,))
             return httpx.Response(
                 status_code,
                 text=html,
@@ -588,6 +640,8 @@ class BrokenImageDetectionTests(unittest.TestCase):
         def fake_get(url, **_):
             if url.endswith("/robots.txt"):
                 return make_response("GET", url, 200, ROBOTS_TXT)
+            if url.endswith("/sitemap.xml"):
+                return make_sitemap_response(url, (START_URL,))
             if url == START_URL:
                 return make_response("GET", url, 200, html)
             return make_response("GET", url, image_statuses[url])
@@ -640,6 +694,10 @@ class BrokenImageDetectionTests(unittest.TestCase):
             get_calls.append(url)
             if url.endswith("/robots.txt"):
                 return make_response("GET", url, 200, ROBOTS_TXT)
+            if url.endswith("/sitemap.xml"):
+                return make_sitemap_response(
+                    url, (START_URL, "https://example.com/page-2")
+                )
             if url == START_URL:
                 return make_response("GET", url, 200, page_one_html)
             if url == "https://example.com/page-2":
@@ -680,6 +738,8 @@ class BrokenImageDetectionTests(unittest.TestCase):
         def fake_get(url, **_):
             if url.endswith("/robots.txt"):
                 return make_response("GET", url, 200, ROBOTS_TXT)
+            if url.endswith("/sitemap.xml"):
+                return make_sitemap_response(url, (START_URL,))
             if url == START_URL:
                 return make_response("GET", url, 200, html)
             checked_urls.append(url)
@@ -714,6 +774,8 @@ class BrokenImageDetectionTests(unittest.TestCase):
         def fake_get(url, **_):
             if url.endswith("/robots.txt"):
                 return make_response("GET", url, 200, ROBOTS_TXT)
+            if url.endswith("/sitemap.xml"):
+                return make_sitemap_response(url, (START_URL,))
             if url == START_URL:
                 return make_response("GET", url, 200, html)
             raise httpx.ConnectError("image host unreachable")
@@ -772,6 +834,8 @@ class UrlSeoAuditTests(unittest.TestCase):
         def fake_get(url, **_):
             if url.endswith("/robots.txt"):
                 return make_response("GET", url, 200, ROBOTS_TXT)
+            if url.endswith("/sitemap.xml"):
+                return make_sitemap_response(url, (target_url,))
             return make_response("GET", url, 200, html_with_canonical)
 
         with patch("crawler.httpx.get", side_effect=fake_get), \
@@ -879,6 +943,8 @@ class RedirectAuditTests(unittest.TestCase):
         def fake_get(url, **_):
             if url.endswith("/robots.txt"):
                 return make_response("GET", url, 200, ROBOTS_TXT)
+            if url.endswith("/sitemap.xml"):
+                return make_sitemap_response(url, (START_URL,))
             return make_response("GET", url, 200, html)
 
         def fake_head(url, **_):
@@ -1026,6 +1092,10 @@ class RedirectAuditTests(unittest.TestCase):
         def fake_get(url, **_):
             if url.endswith("/robots.txt"):
                 return make_response("GET", url, 200, ROBOTS_TXT)
+            if url.endswith("/sitemap.xml"):
+                return make_sitemap_response(
+                    url, (START_URL, "https://example.com/page-2")
+                )
             if url == START_URL:
                 return make_response("GET", url, 200, page_one_html)
             return make_response("GET", url, 200, page_two_html)
@@ -1139,6 +1209,19 @@ class CanonicalSeoAuditTests(unittest.TestCase):
         def fake_get(url, **_):
             if url.endswith("/robots.txt"):
                 return make_response("GET", url, 200, ROBOTS_TXT)
+            if url.endswith("/sitemap.xml"):
+                if any(
+                    non_self in head_tags
+                    for non_self in (
+                        "/canonical-target",
+                        "/blog/canonical-post",
+                        "old-canonical",
+                        "syndication.other.org",
+                        "EXAMPLE.COM/clean",
+                    )
+                ):
+                    return make_sitemap_response(url, ())
+                return make_sitemap_response(url, (page_url,))
             return httpx.Response(
                 200,
                 text=html,
@@ -1348,6 +1431,11 @@ class RobotsSeoAuditTests(unittest.TestCase):
         def fake_get(url, **_):
             if url.endswith("/robots.txt"):
                 return make_response("GET", url, 200, ROBOTS_TXT)
+            if url.endswith("/sitemap.xml"):
+                combined_robots = f"{meta_tags} {x_robots_headers}".lower()
+                if "noindex" in combined_robots or '"none"' in combined_robots:
+                    return make_sitemap_response(url, ())
+                return make_sitemap_response(url, (START_URL,))
             return httpx.Response(
                 200,
                 text=html,
@@ -1513,6 +1601,8 @@ class StructuredDataSeoAuditTests(unittest.TestCase):
         def fake_get(url, **_):
             if url.endswith("/robots.txt"):
                 return make_response("GET", url, 200, ROBOTS_TXT)
+            if url.endswith("/sitemap.xml"):
+                return make_sitemap_response(url, (START_URL,))
             return httpx.Response(
                 200,
                 text=html,
@@ -1708,6 +1798,8 @@ class ContentQualitySeoAuditTests(unittest.TestCase):
         def fake_get(url, **_):
             if url.endswith("/robots.txt"):
                 return make_response("GET", url, 200, ROBOTS_TXT)
+            if url.endswith("/sitemap.xml"):
+                return make_sitemap_response(url, (START_URL,))
             return httpx.Response(
                 200,
                 text=html,
@@ -1848,6 +1940,8 @@ class ContentQualitySeoAuditTests(unittest.TestCase):
         def fake_get(url, **_):
             if url.endswith("/robots.txt"):
                 return make_response("GET", url, 200, ROBOTS_TXT)
+            if url.endswith("/sitemap.xml"):
+                return make_sitemap_response(url, (START_URL, page_two_url))
             if url == START_URL:
                 return make_response("GET", url, 200, html_one)
             return make_response("GET", url, 200, html_two)
@@ -1892,6 +1986,8 @@ class ContentQualitySeoAuditTests(unittest.TestCase):
         def fake_get(url, **_):
             if url.endswith("/robots.txt"):
                 return make_response("GET", url, 200, ROBOTS_TXT)
+            if url.endswith("/sitemap.xml"):
+                return make_sitemap_response(url, (START_URL, page_two_url))
             if url == START_URL:
                 return make_response("GET", url, 200, html_one)
             return make_response("GET", url, 200, html_two)
@@ -1946,6 +2042,8 @@ class PerformanceSeoAuditTests(unittest.TestCase):
         def fake_get(url, **_):
             if url.endswith("/robots.txt"):
                 return make_response("GET", url, 200, ROBOTS_TXT)
+            if url.endswith("/sitemap.xml"):
+                return make_sitemap_response(url, (START_URL,))
             resp = httpx.Response(
                 200,
                 text=html,
@@ -2112,6 +2210,8 @@ class AccessibilitySeoAuditTests(unittest.TestCase):
         def fake_get(url, **_):
             if url.endswith("/robots.txt"):
                 return make_response("GET", url, 200, ROBOTS_TXT)
+            if url.endswith("/sitemap.xml"):
+                return make_sitemap_response(url, (START_URL,))
             return httpx.Response(
                 200,
                 text=html,
@@ -2377,6 +2477,8 @@ class InternalLinkStructureAuditTests(unittest.TestCase):
         def fake_get(url, **_):
             if url.endswith("/robots.txt"):
                 return make_response("GET", url, 200, ROBOTS_TXT)
+            if url.endswith("/sitemap.xml"):
+                return make_sitemap_response(url, list(page_map.keys()))
             if url in page_map:
                 return make_response("GET", url, 200, page_map[url])
             return make_response("GET", url, 404, "")
@@ -2695,6 +2797,530 @@ class InternalLinkStructureAuditTests(unittest.TestCase):
                 iso_issues[0]["isolated_pages"],
                 [island_a, island_b],
             )
+
+
+class SitemapAndRobotsAuditTests(unittest.TestCase):
+    def make_valid_page_html(
+        self,
+        url: str,
+        label: str,
+        links_html: str = "",
+        canonical_url: str | None = None,
+        extra_head_html: str = "",
+    ) -> str:
+        words = " ".join(f"{label}word{i}" for i in range(520))
+        canon = canonical_url if canonical_url is not None else url
+        return (
+            f'<html lang="en"><head><title>Title {label}</title>'
+            f'<meta name="description" content="Description for {label}">'
+            f'<link rel="canonical" href="{canon}">'
+            '<script type="application/ld+json">'
+            '{"@context":"https://schema.org","@type":"WebPage"}'
+            "</script>"
+            f"{extra_head_html}</head>"
+            f"<body><main><h1>Heading {label}</h1><p>{words}</p>{links_html}</main></body></html>"
+        )
+
+    def test_valid_sitemap_and_robots_produce_zero_issues_and_full_coverage(self):
+        about_url = "https://example.com/about"
+        contact_url = "https://example.com/contact"
+        page_map = {
+            START_URL: self.make_valid_page_html(
+                START_URL,
+                "home",
+                links_html=(
+                    f'<a href="{about_url}">About</a>'
+                    f'<a href="{contact_url}">Contact</a>'
+                ),
+            ),
+            about_url: self.make_valid_page_html(
+                about_url,
+                "about",
+                links_html=(
+                    f'<a href="{START_URL}">Home</a>'
+                    f'<a href="{contact_url}">Contact</a>'
+                ),
+            ),
+            contact_url: self.make_valid_page_html(
+                contact_url,
+                "contact",
+                links_html=(
+                    f'<a href="{START_URL}">Home</a>'
+                    f'<a href="{about_url}">About</a>'
+                ),
+            ),
+        }
+
+        def fake_get(url, **_):
+            if url.endswith("/robots.txt"):
+                return make_response("GET", url, 200, ROBOTS_TXT)
+            if url.endswith("/sitemap.xml"):
+                return make_sitemap_response(
+                    url, [START_URL, about_url, contact_url]
+                )
+            if url in page_map:
+                return make_response("GET", url, 200, page_map[url])
+            return make_response("GET", url, 404, "")
+
+        with patch("crawler.httpx.get", side_effect=fake_get), \
+             patch("crawler.httpx.head", return_value=make_response("HEAD", START_URL, 200)), \
+             patch("crawler.time.sleep"):
+            pages = crawler.crawl_website(START_URL, max_pages=5, max_depth=2)
+
+        for p in pages:
+            self.assertTrue(p["in_sitemap"])
+            sitemap_or_robots_issues = [
+                i
+                for i in p["seo_issues"]
+                if "sitemap" in i["type"] or "robots" in i["type"]
+            ]
+            self.assertEqual(sitemap_or_robots_issues, [])
+
+        summary = crawler.summarize_sitemap_coverage(pages)
+        self.assertEqual(
+            summary,
+            {
+                "sitemap_urls_count": 3,
+                "crawled_urls_count": 3,
+                "missing_from_sitemap_count": 0,
+                "sitemap_not_crawled_count": 0,
+            },
+        )
+
+    def test_sitemap_index_and_url_normalization_and_duplicate_and_external_filtering(self):
+        # Sitemap index pointing to two child sitemaps (with a duplicate child reference),
+        # plus uppercase host, #fragment, duplicate <loc>, and external domain <loc>.
+        page_b = "https://example.com/page-b"
+        index_xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+            "  <sitemap><loc>https://example.com/sitemap-main.xml</loc></sitemap>"
+            "  <sitemap><loc>https://EXAMPLE.COM/sitemap-main.xml#dup</loc></sitemap>"
+            "  <sitemap><loc>https://example.com/sitemap-extra.xml</loc></sitemap>"
+            "</sitemapindex>"
+        )
+        child_main_xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+            "  <url><loc>https://EXAMPLE.COM</loc></url>"
+            "  <url><loc>https://example.com/#top</loc></url>"
+            "  <url><loc>https://external.org/other-site</loc></url>"
+            "</urlset>"
+        )
+        child_extra_xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+            f"  <url><loc>{page_b}#section</loc></url>"
+            f"  <url><loc>{page_b}</loc></url>"
+            "</urlset>"
+        )
+        robots_txt = (
+            "User-agent: *\n"
+            "Allow: /\n"
+            "Sitemap: https://example.com/sitemap_index.xml\n"
+        )
+        page_map = {
+            START_URL: self.make_valid_page_html(
+                START_URL, "home", links_html=f'<a href="{page_b}">Page B</a>'
+            ),
+            page_b: self.make_valid_page_html(
+                page_b, "b", links_html=f'<a href="{START_URL}">Home</a>'
+            ),
+        }
+        fetched_sitemaps: list[str] = []
+
+        def fake_get(url, **_):
+            if url.endswith("/robots.txt"):
+                return make_response("GET", url, 200, robots_txt)
+            if url.endswith(".xml"):
+                fetched_sitemaps.append(url)
+                if url.endswith("/sitemap_index.xml"):
+                    return make_response(
+                        "GET", url, 200, index_xml, content_type="application/xml"
+                    )
+                if url.endswith("/sitemap-main.xml"):
+                    return make_response(
+                        "GET", url, 200, child_main_xml, content_type="application/xml"
+                    )
+                if url.endswith("/sitemap-extra.xml"):
+                    return make_response(
+                        "GET", url, 200, child_extra_xml, content_type="application/xml"
+                    )
+                return make_response("GET", url, 404, "")
+            if url in page_map:
+                return make_response("GET", url, 200, page_map[url])
+            return make_response("GET", url, 404, "")
+
+        with patch("crawler.httpx.get", side_effect=fake_get), \
+             patch("crawler.httpx.head", return_value=make_response("HEAD", START_URL, 200)), \
+             patch("crawler.time.sleep"):
+            pages = crawler.crawl_website(START_URL, max_pages=5, max_depth=2)
+
+        # Duplicate child sitemap URL should only be fetched once
+        self.assertEqual(
+            fetched_sitemaps.count("https://example.com/sitemap-main.xml"), 1
+        )
+        for p in pages:
+            self.assertTrue(p["in_sitemap"])
+            sitemap_issues = [
+                i for i in p["seo_issues"] if "sitemap" in i["type"]
+            ]
+            self.assertEqual(sitemap_issues, [])
+
+        summary = crawler.summarize_sitemap_coverage(pages)
+        self.assertEqual(summary["sitemap_urls_count"], 2)
+        self.assertEqual(summary["crawled_urls_count"], 2)
+        self.assertEqual(summary["missing_from_sitemap_count"], 0)
+        self.assertEqual(summary["sitemap_not_crawled_count"], 0)
+
+    def test_missing_sitemap_and_missing_robots_txt_are_detected(self):
+        html = self.make_valid_page_html(START_URL, "home")
+
+        def fake_get(url, **_):
+            if url.endswith("/robots.txt"):
+                return make_response("GET", url, 404, "Not Found")
+            if url.endswith("/sitemap.xml"):
+                return make_response("GET", url, 404, "Not Found")
+            return make_response("GET", url, 200, html)
+
+        with patch("crawler.httpx.get", side_effect=fake_get), \
+             patch("crawler.httpx.head", return_value=make_response("HEAD", START_URL, 200)), \
+             patch("crawler.time.sleep"):
+            pages = crawler.crawl_website(START_URL, max_pages=1, max_depth=0)
+
+        page = pages[0]
+        self.assertFalse(page["in_sitemap"])
+        issue_types = [i["type"] for i in page["seo_issues"]]
+        self.assertIn("missing_robots_txt", issue_types)
+        self.assertIn("missing_sitemap", issue_types)
+
+        missing_robots = next(
+            i for i in page["seo_issues"] if i["type"] == "missing_robots_txt"
+        )
+        self.assertEqual(missing_robots["severity"], "warning")
+        self.assertEqual(missing_robots["status_code"], 404)
+
+        missing_sitemap = next(
+            i for i in page["seo_issues"] if i["type"] == "missing_sitemap"
+        )
+        self.assertEqual(missing_sitemap["severity"], "warning")
+        self.assertEqual(
+            missing_sitemap["sitemap_url"], "https://example.com/sitemap.xml"
+        )
+
+    def test_invalid_sitemap_cases_are_detected_without_crashing(self):
+        html = self.make_valid_page_html(START_URL, "home")
+        bad_sitemaps = [
+            "<urlset><url><loc>https://example.com/unclosed",
+            "   ",
+            "<html><body>Not an XML sitemap</body></html>",
+            '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"></sitemapindex>',
+            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url></url></urlset>',
+            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>not-a-valid-url</loc></url></urlset>',
+        ]
+
+        for xml_payload in bad_sitemaps:
+            def fake_get(url, body=xml_payload, **_):
+                if url.endswith("/robots.txt"):
+                    return make_response("GET", url, 200, ROBOTS_TXT)
+                if url.endswith("/sitemap.xml"):
+                    return make_response(
+                        "GET", url, 200, body, content_type="application/xml"
+                    )
+                return make_response("GET", url, 200, html)
+
+            with patch("crawler.httpx.get", side_effect=fake_get), \
+                 patch("crawler.httpx.head", return_value=make_response("HEAD", START_URL, 200)), \
+                 patch("crawler.time.sleep"):
+                pages = crawler.crawl_website(START_URL, max_pages=1, max_depth=0)
+
+            issue_types = [i["type"] for i in pages[0]["seo_issues"]]
+            self.assertIn(
+                "invalid_sitemap",
+                issue_types,
+                msg=f"Expected invalid_sitemap for payload: {xml_payload}",
+            )
+            self.assertNotIn("missing_sitemap", issue_types)
+
+    def test_sitemap_coverage_mismatches_not_crawled_and_missing_from_sitemap(self):
+        crawled_not_in_sitemap = "https://example.com/in-crawl-only"
+        uncrawled_in_sitemap_1 = "https://example.com/in-sitemap-only-1"
+        uncrawled_in_sitemap_2 = "https://example.com/in-sitemap-only-2"
+
+        page_map = {
+            START_URL: self.make_valid_page_html(
+                START_URL,
+                "home",
+                links_html=f'<a href="{crawled_not_in_sitemap}">Crawl Only</a>',
+            ),
+            crawled_not_in_sitemap: self.make_valid_page_html(
+                crawled_not_in_sitemap,
+                "crawlonly",
+                links_html=f'<a href="{START_URL}">Home</a>',
+            ),
+        }
+
+        def fake_get(url, **_):
+            if url.endswith("/robots.txt"):
+                return make_response("GET", url, 200, ROBOTS_TXT)
+            if url.endswith("/sitemap.xml"):
+                return make_sitemap_response(
+                    url,
+                    [START_URL, uncrawled_in_sitemap_1, uncrawled_in_sitemap_2],
+                )
+            if url in page_map:
+                return make_response("GET", url, 200, page_map[url])
+            return make_response("GET", url, 404, "")
+
+        with patch("crawler.httpx.get", side_effect=fake_get), \
+             patch("crawler.httpx.head", return_value=make_response("HEAD", START_URL, 200)), \
+             patch("crawler.time.sleep"):
+            pages = crawler.crawl_website(START_URL, max_pages=5, max_depth=2)
+
+        by_url = {p["url"]: p for p in pages}
+        self.assertTrue(by_url[START_URL]["in_sitemap"])
+        self.assertFalse(by_url[crawled_not_in_sitemap]["in_sitemap"])
+
+        not_crawled_issues = [
+            i
+            for i in by_url[START_URL]["seo_issues"]
+            if i["type"] == "sitemap_url_not_crawled"
+        ]
+        self.assertEqual(len(not_crawled_issues), 1)
+        self.assertEqual(not_crawled_issues[0]["severity"], "warning")
+        self.assertEqual(not_crawled_issues[0]["sitemap_not_crawled_count"], 2)
+        self.assertEqual(
+            not_crawled_issues[0]["sitemap_urls"],
+            [uncrawled_in_sitemap_1, uncrawled_in_sitemap_2],
+        )
+
+        missing_issues = [
+            i
+            for i in by_url[crawled_not_in_sitemap]["seo_issues"]
+            if i["type"] == "crawled_url_missing_from_sitemap"
+        ]
+        self.assertEqual(len(missing_issues), 1)
+        self.assertEqual(missing_issues[0]["severity"], "warning")
+        self.assertEqual(missing_issues[0]["url"], crawled_not_in_sitemap)
+
+        summary = crawler.summarize_sitemap_coverage(pages)
+        self.assertEqual(
+            summary,
+            {
+                "sitemap_urls_count": 3,
+                "crawled_urls_count": 2,
+                "missing_from_sitemap_count": 1,
+                "sitemap_not_crawled_count": 2,
+            },
+        )
+
+    def test_sitemap_noncanonical_url_and_sitemap_non_indexable_url(self):
+        non_canon_page = "https://example.com/dup-page"
+        canonical_target = "https://example.com/preferred-page"
+        noindex_page = "https://example.com/noindex-page"
+        redirect_in_sitemap = "https://example.com/old-redirect"
+
+        page_map = {
+            START_URL: self.make_valid_page_html(
+                START_URL,
+                "home",
+                links_html=(
+                    f'<a href="{non_canon_page}">Dup</a>'
+                    f'<a href="{noindex_page}">Noindex</a>'
+                    f'<a href="{redirect_in_sitemap}">Old Redirect</a>'
+                ),
+            ),
+            non_canon_page: self.make_valid_page_html(
+                non_canon_page,
+                "dup",
+                canonical_url=canonical_target,
+                links_html=f'<a href="{START_URL}">Home</a>',
+            ),
+            noindex_page: self.make_valid_page_html(
+                noindex_page,
+                "private",
+                extra_head_html='<meta name="robots" content="noindex, follow">',
+                links_html=f'<a href="{START_URL}">Home</a>',
+            ),
+        }
+
+        def fake_get(url, **_):
+            if url.endswith("/robots.txt"):
+                return make_response("GET", url, 200, ROBOTS_TXT)
+            if url.endswith("/sitemap.xml"):
+                return make_sitemap_response(
+                    url,
+                    [
+                        START_URL,
+                        non_canon_page,
+                        noindex_page,
+                        redirect_in_sitemap,
+                    ],
+                )
+            if url == redirect_in_sitemap:
+                return make_response(
+                    "GET", url, 301, "", location=START_URL
+                )
+            if url in page_map:
+                return make_response("GET", url, 200, page_map[url])
+            return make_response("GET", url, 404, "")
+
+        def fake_head(url, **_):
+            if url == redirect_in_sitemap:
+                return make_response(
+                    "HEAD", url, 301, location=START_URL
+                )
+            return make_response("HEAD", url, 200)
+
+        with patch("crawler.httpx.get", side_effect=fake_get), \
+             patch("crawler.httpx.head", side_effect=fake_head), \
+             patch("crawler.time.sleep"):
+            pages = crawler.crawl_website(START_URL, max_pages=5, max_depth=2)
+
+        by_url = {p["url"]: p for p in pages}
+
+        # 1. non_canon_page has canonical pointing to canonical_target, and is in sitemap
+        dup_noncanon = [
+            i
+            for i in by_url[non_canon_page]["seo_issues"]
+            if i["type"] == "sitemap_noncanonical_url"
+        ]
+        self.assertEqual(len(dup_noncanon), 1)
+        self.assertEqual(dup_noncanon[0]["canonical_url"], canonical_target)
+
+        # 2. redirect_in_sitemap redirected to START_URL and was listed in sitemap
+        redir_noncanon = [
+            i
+            for p in pages
+            for i in p["seo_issues"]
+            if i["type"] == "sitemap_noncanonical_url"
+            and i.get("sitemap_url") == redirect_in_sitemap
+        ]
+        self.assertEqual(len(redir_noncanon), 1)
+        self.assertEqual(redir_noncanon[0]["source_url"], redirect_in_sitemap)
+        self.assertEqual(redir_noncanon[0]["destination_url"], START_URL)
+
+        # 3. noindex_page is marked noindex and is listed in sitemap -> sitemap_non_indexable_url
+        #    also not flagged as missing from sitemap
+        private_issues = by_url[noindex_page]["seo_issues"]
+        non_indexable = [
+            i
+            for i in private_issues
+            if i["type"] == "sitemap_non_indexable_url"
+        ]
+        self.assertEqual(len(non_indexable), 1)
+        self.assertEqual(non_indexable[0]["severity"], "warning")
+        self.assertEqual(
+            non_indexable[0]["robots_directive"], "noindex, follow"
+        )
+
+    def test_invalid_robots_txt_and_robots_sitemap_missing_and_blocked_urls(self):
+        # 1. Invalid robots.txt syntax (directive before User-agent, missing colon, unknown directive, invalid sitemap URL)
+        bad_robots = (
+            "Disallow: /orphan-rule\n"
+            "User-agent: *\n"
+            "malformed line without colon\n"
+            "Unknown-directive: value\n"
+            "Crawl-delay: not-a-number\n"
+            "Sitemap: relative-sitemap.xml\n"
+        )
+        # 2. Discoverable /sitemap.xml exists, but robots.txt has no valid Sitemap: directive -> robots_sitemap_missing
+        # 3. Sitemap includes /blocked-in-sitemap which is disallowed in robots.txt -> robots_blocked_sitemap_url
+        # 4. Start page is disallowed for Googlebot (while allowed for CrawlScope) -> robots_blocked_crawled_url
+        robots_with_blocks = (
+            "User-agent: CrawlScope\n"
+            "Allow: /\n"
+            "Disallow: /blocked-in-sitemap\n\n"
+            "User-agent: Googlebot\n"
+            "Disallow: /google-blocked\n"
+        )
+        google_blocked_url = "https://example.com/google-blocked"
+        blocked_sitemap_url = "https://example.com/blocked-in-sitemap"
+
+        page_map = {
+            START_URL: self.make_valid_page_html(
+                START_URL,
+                "home",
+                links_html=f'<a href="{google_blocked_url}">Google Blocked</a>',
+            ),
+            google_blocked_url: self.make_valid_page_html(
+                google_blocked_url,
+                "gblocked",
+                links_html=f'<a href="{START_URL}">Home</a>',
+            ),
+        }
+
+        def fake_get_bad_robots(url, **_):
+            if url.endswith("/robots.txt"):
+                return make_response("GET", url, 200, bad_robots)
+            if url.endswith("/sitemap.xml"):
+                return make_sitemap_response(url, [START_URL])
+            return make_response("GET", url, 200, page_map[START_URL])
+
+        with patch("crawler.httpx.get", side_effect=fake_get_bad_robots), \
+             patch("crawler.httpx.head", return_value=make_response("HEAD", START_URL, 200)), \
+             patch("crawler.time.sleep"):
+            bad_robots_pages = crawler.crawl_website(
+                START_URL, max_pages=1, max_depth=0
+            )
+
+        bad_robots_types = [
+            i["type"] for i in bad_robots_pages[0]["seo_issues"]
+        ]
+        self.assertIn("invalid_robots_txt", bad_robots_types)
+        self.assertIn("robots_sitemap_missing", bad_robots_types)
+
+        def fake_get_blocks(url, **_):
+            if url.endswith("/robots.txt"):
+                return make_response("GET", url, 200, robots_with_blocks)
+            if url.endswith("/sitemap.xml"):
+                return make_sitemap_response(
+                    url,
+                    [START_URL, google_blocked_url, blocked_sitemap_url],
+                )
+            if url in page_map:
+                return make_response("GET", url, 200, page_map[url])
+            return make_response("GET", url, 404, "")
+
+        with patch("crawler.httpx.get", side_effect=fake_get_blocks), \
+             patch("crawler.httpx.head", return_value=make_response("HEAD", START_URL, 200)), \
+             patch("crawler.time.sleep"):
+            block_pages = crawler.crawl_website(
+                START_URL, max_pages=5, max_depth=2
+            )
+
+        by_url = {p["url"]: p for p in block_pages}
+
+        # robots_sitemap_missing on start page
+        start_issues = by_url[START_URL]["seo_issues"]
+        self.assertTrue(
+            any(i["type"] == "robots_sitemap_missing" for i in start_issues)
+        )
+
+        # robots_blocked_sitemap_url for /blocked-in-sitemap and /google-blocked
+        all_blocked_sitemap_issues = [
+            i
+            for p in block_pages
+            for i in p["seo_issues"]
+            if i["type"] == "robots_blocked_sitemap_url"
+        ]
+        blocked_sitemap_locs = [
+            i["sitemap_url"] for i in all_blocked_sitemap_issues
+        ]
+        self.assertIn(blocked_sitemap_url, blocked_sitemap_locs)
+        self.assertIn(google_blocked_url, blocked_sitemap_locs)
+
+        # robots_blocked_crawled_url on google_blocked_url (crawled because CrawlScope is allowed, but blocked for Googlebot)
+        gblocked_issues = [
+            i
+            for i in by_url[google_blocked_url]["seo_issues"]
+            if i["type"] == "robots_blocked_crawled_url"
+        ]
+        self.assertEqual(len(gblocked_issues), 1)
+        self.assertEqual(gblocked_issues[0]["severity"], "warning")
+        self.assertEqual(
+            gblocked_issues[0]["directive_source"], "robots_txt"
+        )
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 import json
 import time
+import xml.etree.ElementTree as ET
 from collections import deque
 from pathlib import Path
 from typing import Any
@@ -2116,7 +2117,7 @@ def _normalize_internal_url(url: str) -> str:
         (
             parsed.scheme.lower(),
             netloc,
-            parsed.path or "",
+            parsed.path or "/",
             parsed.params or "",
             parsed.query or "",
             "",
@@ -2187,15 +2188,29 @@ def _extract_page_internal_link_data(
             outgoing_urls.append(normalized_target)
 
     canonical_url: str | None = None
+    resolved_canonical_url: str | None = None
     canonical_tags = _find_canonical_link_tags(soup)
     if len(canonical_tags) == 1:
         resolved_canon, canon_valid = _resolve_canonical_url(
             page_url, canonical_tags[0].get("href")
         )
         if canon_valid and resolved_canon:
+            resolved_canonical_url = _normalize_internal_url(resolved_canon)
             canon_host = (urlparse(resolved_canon).hostname or "").casefold()
             if canon_host == target_host:
-                canonical_url = _normalize_internal_url(resolved_canon)
+                canonical_url = resolved_canonical_url
+
+    sitemap_link_urls: list[str] = []
+    for link_tag in soup.find_all("link"):
+        rel_tokens = _extract_rel_tokens(link_tag)
+        if "sitemap" not in rel_tokens:
+            continue
+        raw_sitemap_href = link_tag.get("href")
+        if not isinstance(raw_sitemap_href, str) or not raw_sitemap_href.strip():
+            continue
+        resolved_sm, _ = urldefrag(urljoin(page_url, raw_sitemap_href.strip()))
+        if _validate_http_url(resolved_sm) and resolved_sm not in sitemap_link_urls:
+            sitemap_link_urls.append(resolved_sm)
 
     # Check if page has any meta robots / X-Robots-Tag directive preventing link following
     has_nofollow_directive = False
@@ -2232,6 +2247,8 @@ def _extract_page_internal_link_data(
         "outgoing_urls": outgoing_urls,
         "nofollow_internal_urls": nofollow_internal_urls,
         "canonical_url": canonical_url,
+        "resolved_canonical_url": resolved_canonical_url,
+        "sitemap_link_urls": sitemap_link_urls,
         "has_nofollow_directive": has_nofollow_directive,
         "nofollow_directive": " | ".join(nofollow_directives)
         if nofollow_directives
@@ -2591,6 +2608,960 @@ def detect_internal_link_structure_issues(
             )
 
 
+MAX_SITEMAP_FETCHES = 10
+
+_VALID_ROBOTS_DIRECTIVES = {
+    "user-agent",
+    "disallow",
+    "allow",
+    "sitemap",
+    "crawl-delay",
+    "host",
+    "clean-param",
+    "request-rate",
+    "visit-time",
+    "noindex",
+}
+
+
+def _validate_http_url(url: str) -> bool:
+    """Return True if url has a valid http/https scheme and non-empty hostname."""
+    if not url or any(ch.isspace() for ch in url):
+        return False
+    parsed = urlparse(url)
+    return parsed.scheme.lower() in ("http", "https") and bool(parsed.hostname)
+
+
+def _parse_and_validate_robots_txt(
+    robots_text: str | None,
+    robots_url: str,
+) -> dict[str, Any]:
+    """Parse robots.txt content for Sitemap directives and syntax/parsing issues."""
+    sitemap_urls: list[str] = []
+    seen_sitemaps: set[str] = set()
+    invalid_lines: list[str] = []
+
+    if not robots_text:
+        return {
+            "sitemap_urls": sitemap_urls,
+            "invalid_lines": invalid_lines,
+        }
+
+    seen_user_agent = False
+
+    for line_num, raw_line in enumerate(robots_text.splitlines(), start=1):
+        # Remove inline comments and surrounding whitespace
+        line = raw_line.split("#", 1)[0].strip()
+        if not line:
+            continue
+
+        if ":" not in line:
+            invalid_lines.append(
+                f"Line {line_num} ('{line}'): missing ':' separator"
+            )
+            continue
+
+        directive_part, value_part = line.split(":", 1)
+        directive = directive_part.strip().lower()
+        value = value_part.strip()
+
+        if directive not in _VALID_ROBOTS_DIRECTIVES:
+            invalid_lines.append(
+                f"Line {line_num} ('{line}'): unknown directive '{directive_part.strip()}'"
+            )
+            continue
+
+        if directive == "user-agent":
+            if not value:
+                invalid_lines.append(
+                    f"Line {line_num} ('{line}'): empty User-agent value"
+                )
+            else:
+                seen_user_agent = True
+        elif directive in ("disallow", "allow"):
+            if not seen_user_agent:
+                invalid_lines.append(
+                    f"Line {line_num} ('{line}'): '{directive_part.strip()}' rule before any 'User-agent'"
+                )
+            elif value and not (value.startswith("/") or value.startswith("*")):
+                invalid_lines.append(
+                    f"Line {line_num} ('{line}'): path must start with '/' or '*'"
+                )
+        elif directive == "sitemap":
+            if not value:
+                invalid_lines.append(
+                    f"Line {line_num} ('{line}'): empty Sitemap URL"
+                )
+            else:
+                clean_sm, _ = urldefrag(value)
+                if not _validate_http_url(clean_sm):
+                    invalid_lines.append(
+                        f"Line {line_num} ('{line}'): invalid Sitemap URL '{value}'"
+                    )
+                else:
+                    norm_sm = _normalize_internal_url(clean_sm)
+                    if norm_sm not in seen_sitemaps:
+                        seen_sitemaps.add(norm_sm)
+                        sitemap_urls.append(clean_sm)
+        elif directive == "crawl-delay":
+            try:
+                delay_val = float(value)
+                if delay_val < 0:
+                    invalid_lines.append(
+                        f"Line {line_num} ('{line}'): negative Crawl-delay"
+                    )
+            except ValueError:
+                invalid_lines.append(
+                    f"Line {line_num} ('{line}'): non-numeric Crawl-delay '{value}'"
+                )
+
+    return {
+        "sitemap_urls": sitemap_urls,
+        "invalid_lines": invalid_lines,
+    }
+
+
+def _is_url_blocked_by_robots(
+    url: str,
+    robot_parser: RobotFileParser | None,
+    user_agent: str = "CrawlScope/0.1 (website auditing learning project)",
+) -> bool:
+    """Return True if url is disallowed by robots.txt for CrawlScope, '*', or 'Googlebot'."""
+    if robot_parser is None:
+        return False
+    if getattr(robot_parser, "allow_all", False):
+        return False
+    if getattr(robot_parser, "disallow_all", False):
+        return True
+
+    for agent in (user_agent, "*", "Googlebot"):
+        try:
+            if not robot_parser.can_fetch(agent, url):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _local_xml_tag_name(tag: Any) -> str:
+    if not isinstance(tag, str):
+        return ""
+    if "}" in tag:
+        return tag.split("}", 1)[1].strip().lower()
+    if ":" in tag:
+        return tag.split(":", 1)[1].strip().lower()
+    return tag.strip().lower()
+
+
+def _fetch_and_parse_sitemaps(
+    candidate_sitemap_urls: list[str],
+    target_hostname: str | None,
+    headers: dict[str, str],
+    max_fetches: int = MAX_SITEMAP_FETCHES,
+) -> dict[str, Any]:
+    """Fetch and parse XML sitemaps and nested sitemap index files safely."""
+    target_host_fold = (target_hostname or "").casefold()
+    queue: deque[str] = deque()
+    queued_norm: set[str] = set()
+
+    for sm_url in candidate_sitemap_urls:
+        clean_sm, _ = urldefrag(sm_url.strip())
+        norm_sm = _normalize_internal_url(clean_sm)
+        if norm_sm not in queued_norm:
+            queued_norm.add(norm_sm)
+            queue.append(clean_sm)
+
+    visited_sitemaps: set[str] = set()
+    fetched_sitemap_urls: list[str] = []
+    valid_sitemap_urls: list[str] = []
+    missing_sitemap_urls: list[tuple[str, int | None]] = []
+    invalid_sitemaps: list[tuple[str, str]] = []
+
+    internal_loc_urls: list[str] = []
+    internal_norm_to_raw: dict[str, str] = {}
+    external_loc_urls: list[str] = []
+
+    while queue and len(visited_sitemaps) < max_fetches:
+        current_sm_url = queue.popleft()
+        norm_current = _normalize_internal_url(current_sm_url)
+        if norm_current in visited_sitemaps:
+            continue
+        visited_sitemaps.add(norm_current)
+        fetched_sitemap_urls.append(current_sm_url)
+
+        try:
+            sm_response = httpx.get(
+                current_sm_url,
+                headers=headers,
+                timeout=10.0,
+                follow_redirects=True,
+            )
+        except httpx.RequestError:
+            missing_sitemap_urls.append((current_sm_url, None))
+            continue
+
+        if sm_response.status_code >= 400:
+            missing_sitemap_urls.append(
+                (current_sm_url, sm_response.status_code)
+            )
+            continue
+
+        raw_xml = (sm_response.text or "").strip()
+        if not raw_xml:
+            invalid_sitemaps.append((current_sm_url, "empty sitemap response"))
+            continue
+
+        try:
+            root = ET.fromstring(raw_xml)
+        except ET.ParseError as exc:
+            invalid_sitemaps.append(
+                (current_sm_url, f"XML parse error: {exc}")
+            )
+            continue
+
+        root_name = _local_xml_tag_name(root.tag)
+        if root_name not in ("urlset", "sitemapindex"):
+            invalid_sitemaps.append(
+                (
+                    current_sm_url,
+                    f"unexpected root element <{root_name or 'unknown'}> (expected <urlset> or <sitemapindex>)",
+                )
+            )
+            continue
+
+        if root_name == "sitemapindex":
+            child_sitemaps: list[str] = []
+            sitemap_entry_Error: str | None = None
+            children = list(root)
+            if not children:
+                invalid_sitemaps.append(
+                    (
+                        current_sm_url,
+                        "<sitemapindex> contains no <sitemap> entries",
+                    )
+                )
+                continue
+
+            for child in children:
+                child_name = _local_xml_tag_name(child.tag)
+                if child_name != "sitemap":
+                    sitemap_entry_Error = f"<sitemapindex> contains invalid child element <{child_name}>"
+                    break
+                loc_text: str | None = None
+                for sub in child:
+                    if _local_xml_tag_name(sub.tag) == "loc":
+                        loc_text = (sub.text or "").strip()
+                        break
+                if not loc_text:
+                    sitemap_entry_Error = (
+                        "<sitemap> entry in <sitemapindex> is missing <loc>"
+                    )
+                    break
+                clean_child_sm, _ = urldefrag(loc_text)
+                if not _validate_http_url(clean_child_sm):
+                    sitemap_entry_Error = f"<sitemap> entry has invalid <loc> URL '{loc_text}'"
+                    break
+                child_sitemaps.append(clean_child_sm)
+
+            if sitemap_entry_Error:
+                invalid_sitemaps.append((current_sm_url, sitemap_entry_Error))
+                continue
+
+            valid_sitemap_urls.append(current_sm_url)
+            for child_sm_url in child_sitemaps:
+                norm_child = _normalize_internal_url(child_sm_url)
+                if (
+                    norm_child not in visited_sitemaps
+                    and norm_child not in queued_norm
+                ):
+                    queued_norm.add(norm_child)
+                    queue.append(child_sm_url)
+
+        elif root_name == "urlset":
+            url_entry_error: str | None = None
+            parsed_locs: list[str] = []
+            for child in list(root):
+                child_name = _local_xml_tag_name(child.tag)
+                if child_name != "url":
+                    url_entry_error = (
+                        f"<urlset> contains invalid child element <{child_name}>"
+                    )
+                    break
+                loc_text = None
+                for sub in child:
+                    if _local_xml_tag_name(sub.tag) == "loc":
+                        loc_text = (sub.text or "").strip()
+                        break
+                if not loc_text:
+                    url_entry_error = "<url> entry in <urlset> is missing <loc>"
+                    break
+                clean_loc, _ = urldefrag(loc_text)
+                if not _validate_http_url(clean_loc):
+                    url_entry_error = (
+                        f"<url> entry has invalid <loc> URL '{loc_text}'"
+                    )
+                    break
+                parsed_locs.append(clean_loc)
+
+            if url_entry_error:
+                invalid_sitemaps.append((current_sm_url, url_entry_error))
+                continue
+
+            valid_sitemap_urls.append(current_sm_url)
+            for clean_loc in parsed_locs:
+                parsed_loc_obj = urlparse(clean_loc)
+                loc_host = (parsed_loc_obj.hostname or "").casefold()
+                if loc_host != target_host_fold:
+                    if clean_loc not in external_loc_urls:
+                        external_loc_urls.append(clean_loc)
+                    continue
+
+                norm_loc = _normalize_internal_url(clean_loc)
+                if norm_loc not in internal_norm_to_raw:
+                    internal_norm_to_raw[norm_loc] = clean_loc
+                    internal_loc_urls.append(norm_loc)
+
+    return {
+        "fetched_sitemap_urls": fetched_sitemap_urls,
+        "valid_sitemap_urls": valid_sitemap_urls,
+        "missing_sitemap_urls": missing_sitemap_urls,
+        "invalid_sitemaps": invalid_sitemaps,
+        "internal_loc_urls": internal_loc_urls,
+        "internal_norm_to_raw": internal_norm_to_raw,
+        "external_loc_urls": external_loc_urls,
+    }
+
+
+def detect_sitemap_and_robots_issues(
+    results: list[dict[str, Any]],
+    start_url: str,
+    robots_url: str | None = None,
+    robots_status_code: int | None = 200,
+    robots_text: str | None = None,
+    robot_parser: RobotFileParser | None = None,
+    headers: dict[str, str] | None = None,
+    page_link_data: dict[str, dict[str, Any]] | None = None,
+    checked_redirects: dict[str, dict[str, Any] | None] | None = None,
+    initial_link_hops: dict[str, tuple[int | None, str | None, str | None]]
+    | None = None,
+    link_results: list[dict[str, Any]] | None = None,
+    user_agent: str = "CrawlScope/0.1 (website auditing learning project)",
+) -> dict[str, int]:
+    """Perform the XML Sitemap & Robots.txt Audit and update page results with findings and coverage."""
+    for page in results:
+        page.setdefault("in_sitemap", False)
+
+    html_pages = [
+        page
+        for page in results
+        if page.get("error") is None and is_html_content(page.get("content_type"))
+    ]
+    if not html_pages:
+        return {
+            "sitemap_urls_count": 0,
+            "crawled_urls_count": 0,
+            "missing_from_sitemap_count": 0,
+            "sitemap_not_crawled_count": 0,
+        }
+
+    if headers is None:
+        headers = {"User-Agent": user_agent}
+    if page_link_data is None:
+        page_link_data = {}
+    if checked_redirects is None:
+        checked_redirects = {}
+    if initial_link_hops is None:
+        initial_link_hops = {}
+    if link_results is None:
+        link_results = []
+
+    clean_start_url, _ = urldefrag(start_url)
+    parsed_start = urlparse(clean_start_url)
+    target_hostname = parsed_start.hostname
+    if not robots_url:
+        robots_url = f"{parsed_start.scheme}://{target_hostname}/robots.txt"
+    default_sitemap_url = (
+        f"{parsed_start.scheme}://{target_hostname}/sitemap.xml"
+    )
+
+    primary_page = html_pages[0]
+    primary_url = primary_page["url"]
+    primary_issues = primary_page.setdefault("seo_issues", [])
+    primary_issue_types = {issue.get("type") for issue in primary_issues}
+
+    # 1. Analyze robots.txt availability and syntax
+    robots_available = (
+        robots_status_code is not None and 200 <= robots_status_code < 300
+    )
+    robots_parsed = _parse_and_validate_robots_txt(
+        robots_text if robots_available else None,
+        robots_url,
+    )
+    robots_sitemaps = robots_parsed["sitemap_urls"]
+    invalid_robots_lines = robots_parsed["invalid_lines"]
+
+    if not robots_available and "missing_robots_txt" not in primary_issue_types:
+        primary_issue_types.add("missing_robots_txt")
+        status_label = (
+            f"HTTP {robots_status_code}"
+            if robots_status_code is not None
+            else "unreachable"
+        )
+        primary_issues.append(
+            {
+                "type": "missing_robots_txt",
+                "severity": "warning",
+                "message": (
+                    f"Website robots.txt file is unavailable at {robots_url} "
+                    f"({status_label}); add a valid robots.txt file to guide "
+                    f"search engine crawlers and declare your XML sitemap."
+                ),
+                "url": primary_url,
+                "robots_txt_url": robots_url,
+                "status_code": robots_status_code,
+            }
+        )
+
+    if (
+        robots_available
+        and invalid_robots_lines
+        and "invalid_robots_txt" not in primary_issue_types
+    ):
+        primary_issue_types.add("invalid_robots_txt")
+        primary_issues.append(
+            {
+                "type": "invalid_robots_txt",
+                "severity": "warning",
+                "message": (
+                    f"robots.txt at {robots_url} contains {len(invalid_robots_lines)} "
+                    f"parsing issue(s) ({'; '.join(invalid_robots_lines[:3])}); "
+                    f"fix directive syntax so search engines interpret crawl rules accurately."
+                ),
+                "url": primary_url,
+                "robots_txt_url": robots_url,
+                "invalid_lines": list(invalid_robots_lines),
+            }
+        )
+
+    #Build an auxiliary RobotFileParser from robots_text if needed so we can check '*' and 'Googlebot' rules
+    audit_robot_parser = robot_parser
+    if audit_robot_parser is None and robots_available and robots_text:
+        audit_robot_parser = RobotFileParser()
+        audit_robot_parser.set_url(robots_url)
+        audit_robot_parser.parse(robots_text.splitlines())
+
+    # 2. Check if any crawled pages are disallowed by robots.txt rules (robots_blocked_crawled_url)
+    for page in html_pages:
+        page_url = page["url"]
+        if _is_url_blocked_by_robots(page_url, audit_robot_parser, user_agent):
+            p_issues = page.setdefault("seo_issues", [])
+            p_types = {i.get("type") for i in p_issues}
+            if "robots_blocked_crawled_url" not in p_types:
+                p_types.add("robots_blocked_crawled_url")
+                p_issues.append(
+                    {
+                        "type": "robots_blocked_crawled_url",
+                        "severity": "warning",
+                        "message": (
+                            f"Crawled page {page_url} is disallowed by rules in "
+                            f"{robots_url}; update robots.txt if this page should "
+                            f"be crawlable by search engines."
+                        ),
+                        "url": page_url,
+                        "robots_txt_url": robots_url,
+                        "directive_source": "robots_txt",
+                    }
+                )
+
+    # 3. Discover and fetch XML sitemaps
+    html_declared_sitemaps: list[str] = []
+    for page in html_pages:
+        info = page_link_data.get(page["url"], {})
+        for sm_link in info.get("sitemap_link_urls", []):
+            if sm_link not in html_declared_sitemaps:
+                html_declared_sitemaps.append(sm_link)
+
+    candidate_sitemaps: list[str] = []
+    for sm in robots_sitemaps + html_declared_sitemaps:
+        if sm not in candidate_sitemaps:
+            candidate_sitemaps.append(sm)
+
+    if not candidate_sitemaps:
+        candidate_sitemaps.append(default_sitemap_url)
+
+    sitemap_data = _fetch_and_parse_sitemaps(
+        candidate_sitemap_urls=candidate_sitemaps,
+        target_hostname=target_hostname,
+        headers=headers,
+    )
+
+    valid_sitemap_urls = sitemap_data["valid_sitemap_urls"]
+    invalid_sitemaps = sitemap_data["invalid_sitemaps"]
+    missing_sitemap_urls = sitemap_data["missing_sitemap_urls"]
+    internal_loc_norms: list[str] = sitemap_data["internal_loc_urls"]
+    internal_norm_to_raw: dict[str, str] = sitemap_data["internal_norm_to_raw"]
+
+    # Report invalid_sitemap for any malformed sitemaps
+    for bad_sm_url, reason in invalid_sitemaps:
+        primary_issues.append(
+            {
+                "type": "invalid_sitemap",
+                "severity": "warning",
+                "message": (
+                    f"XML sitemap at {bad_sm_url} could not be parsed ({reason}); "
+                    f"ensure the file is valid XML with <urlset> or <sitemapindex> and valid <loc> tags."
+                ),
+                "url": primary_url,
+                "sitemap_url": bad_sm_url,
+            }
+        )
+        primary_issue_types.add("invalid_sitemap")
+
+    # Report missing_sitemap if no valid sitemap was found and no invalid_sitemap was already reported,
+    # or if explicitly declared sitemaps were missing (404/unreachable)
+    if not valid_sitemap_urls and not invalid_sitemaps:
+        checked_url = (
+            missing_sitemap_urls[0][0]
+            if missing_sitemap_urls
+            else default_sitemap_url
+        )
+        checked_status = (
+            missing_sitemap_urls[0][1] if missing_sitemap_urls else None
+        )
+        if "missing_sitemap" not in primary_issue_types:
+            primary_issue_types.add("missing_sitemap")
+            primary_issues.append(
+                {
+                    "type": "missing_sitemap",
+                    "severity": "warning",
+                    "message": (
+                        f"No discoverable XML sitemap was found (checked {checked_url}); "
+                        f"create an XML sitemap and reference it in robots.txt."
+                    ),
+                    "url": primary_url,
+                    "sitemap_url": checked_url,
+                    "status_code": checked_status,
+                }
+            )
+    elif valid_sitemap_urls and missing_sitemap_urls:
+        # A child sitemap in a sitemapindex or a second declared sitemap was missing
+        for missing_sm_url, missing_status in missing_sitemap_urls:
+            primary_issues.append(
+                {
+                    "type": "invalid_sitemap",
+                    "severity": "warning",
+                    "message": (
+                        f"Referenced XML sitemap at {missing_sm_url} is unreachable "
+                        f"(HTTP {missing_status or 'ERR'}); remove broken sitemap references "
+                        f"or restore the missing sitemap file."
+                    ),
+                    "url": primary_url,
+                    "sitemap_url": missing_sm_url,
+                    "status_code": missing_status,
+                }
+            )
+            primary_issue_types.add("invalid_sitemap")
+
+    # Report robots_sitemap_missing if a valid sitemap was discovered, robots.txt is available,
+    # but robots.txt does not declare any Sitemap: directive
+    if (
+        valid_sitemap_urls
+        and robots_available
+        and not robots_sitemaps
+        and "robots_sitemap_missing" not in primary_issue_types
+    ):
+        primary_issue_types.add("robots_sitemap_missing")
+        primary_issues.append(
+            {
+                "type": "robots_sitemap_missing",
+                "severity": "warning",
+                "message": (
+                    f"XML sitemap ({valid_sitemap_urls[0]}) is discoverable, but "
+                    f"{robots_url} does not declare a 'Sitemap:' directive; add "
+                    f"'Sitemap: {valid_sitemap_urls[0]}' to robots.txt."
+                ),
+                "url": primary_url,
+                "robots_txt_url": robots_url,
+                "sitemap_url": valid_sitemap_urls[0],
+            }
+        )
+
+    # Map normalized crawled URLs to page dicts
+    norm_to_crawled_page: dict[str, dict[str, Any]] = {}
+    norm_to_any_page: dict[str, dict[str, Any]] = {}
+    for page in results:
+        norm_p = _normalize_internal_url(page["url"])
+        norm_to_any_page[norm_p] = page
+        if page.get("error") is None and is_html_content(page.get("content_type")):
+            norm_to_crawled_page[norm_p] = page
+
+    sitemap_norm_set = set(internal_loc_norms)
+    for page in html_pages:
+        norm_p = _normalize_internal_url(page["url"])
+        page["in_sitemap"] = norm_p in sitemap_norm_set
+
+    # Map normalized redirecting URLs and broken links from already collected crawl data
+    norm_redirects: dict[str, dict[str, Any]] = {}
+    for src_url, redir_info in checked_redirects.items():
+        if redir_info is not None:
+            norm_redirects[_normalize_internal_url(src_url)] = redir_info
+    for src_url, hop_tuple in initial_link_hops.items():
+        hop_status, hop_location, _ = hop_tuple
+        norm_src = _normalize_internal_url(src_url)
+        if (
+            norm_src not in norm_redirects
+            and hop_status in (301, 302, 303, 307, 308)
+            and hop_location
+        ):
+            dest_abs, _ = urldefrag(urljoin(src_url, hop_location))
+            norm_redirects[norm_src] = {
+                "source_url": src_url,
+                "destination_url": dest_abs,
+                "status_code": hop_status,
+            }
+
+    norm_broken_links: dict[str, int | None] = {}
+    for link_item in link_results:
+        if link_item.get("result") == "broken":
+            norm_broken_links[_normalize_internal_url(link_item["url"])] = (
+                link_item.get("status_code")
+            )
+
+    # 4. Inspect each internal URL in the valid sitemap(s)
+    uncrawled_sitemap_urls: list[str] = []
+    blocked_sitemap_urls: list[str] = []
+
+    for norm_loc in internal_loc_norms:
+        raw_loc = internal_norm_to_raw.get(norm_loc, norm_loc)
+        crawled_page = norm_to_crawled_page.get(norm_loc)
+        any_page = norm_to_any_page.get(norm_loc)
+
+        is_blocked = _is_url_blocked_by_robots(
+            raw_loc, audit_robot_parser, user_agent
+        )
+        if is_blocked:
+            blocked_sitemap_urls.append(raw_loc)
+            target_page = crawled_page if crawled_page is not None else primary_page
+            t_issues = target_page.setdefault("seo_issues", [])
+            t_issues.append(
+                {
+                    "type": "robots_blocked_sitemap_url",
+                    "severity": "warning",
+                    "message": (
+                        f"Sitemap URL {raw_loc} is blocked by robots.txt disallow "
+                        f"rules; remove the URL from the XML sitemap or allow it in robots.txt."
+                    ),
+                    "url": target_page["url"],
+                    "sitemap_url": raw_loc,
+                    "robots_txt_url": robots_url,
+                }
+            )
+
+        if crawled_page is None:
+            # Check if it was attempted and failed (e.g. HTTP 404/500 in results) or broken in link_results
+            failed_status: int | None = None
+            any_status = (
+                any_page.get("status_code") if any_page is not None else None
+            )
+            if any_page is not None and (
+                (any_status is not None and any_status >= 400)
+                or (any_status is None and any_page.get("error") is not None)
+            ):
+                failed_status = any_status
+            elif norm_loc in norm_broken_links:
+                failed_status = norm_broken_links[norm_loc]
+
+            if failed_status is not None:
+                primary_issues.append(
+                    {
+                        "type": "sitemap_non_indexable_url",
+                        "severity": "warning",
+                        "message": (
+                            f"Sitemap URL {raw_loc} returned HTTP {failed_status} "
+                            f"and is non-indexable; remove broken URLs from the XML sitemap."
+                        ),
+                        "url": primary_url,
+                        "sitemap_url": raw_loc,
+                        "status_code": failed_status,
+                    }
+                )
+            elif norm_loc in norm_redirects:
+                redir = norm_redirects[norm_loc]
+                dest_url = redir.get("destination_url")
+                primary_issues.append(
+                    {
+                        "type": "sitemap_noncanonical_url",
+                        "severity": "warning",
+                        "message": (
+                            f"Sitemap URL {raw_loc} redirects to {dest_url}; "
+                            f"replace redirecting URLs in the XML sitemap with the final canonical destination URL."
+                        ),
+                        "url": primary_url,
+                        "sitemap_url": raw_loc,
+                        "source_url": raw_loc,
+                        "destination_url": dest_url,
+                        "canonical_url": dest_url,
+                    }
+                )
+
+            if any_page is None and not is_blocked:
+                uncrawled_sitemap_urls.append(raw_loc)
+            continue
+
+        # The sitemap URL was crawled as an HTML page: check indexability and canonical alignment
+        page_issues = crawled_page.setdefault("seo_issues", [])
+        page_issue_types = {i.get("type") for i in page_issues}
+
+        # Check sitemap_non_indexable_url (marked noindex or non-200 status)
+        has_noindex = "noindex_page" in page_issue_types
+        page_status = crawled_page.get("status_code")
+        is_error_status = page_status is not None and page_status >= 400
+
+        if (
+            (has_noindex or is_error_status)
+            and "sitemap_non_indexable_url" not in page_issue_types
+        ):
+            page_issue_types.add("sitemap_non_indexable_url")
+            noindex_issue = next(
+                (i for i in page_issues if i.get("type") == "noindex_page"),
+                None,
+            )
+            directive_desc = (
+                noindex_issue.get("robots_directive")
+                if noindex_issue
+                else f"HTTP {page_status}"
+            )
+            page_issues.append(
+                {
+                    "type": "sitemap_non_indexable_url",
+                    "severity": "warning",
+                    "message": (
+                        f"Sitemap URL {raw_loc} is marked non-indexable "
+                        f"({directive_desc}); remove non-indexable pages from "
+                        f"the XML sitemap or make the page indexable."
+                    ),
+                    "url": crawled_page["url"],
+                    "sitemap_url": raw_loc,
+                    "robots_directive": directive_desc,
+                }
+            )
+
+        # Check sitemap_noncanonical_url (page canonical points to a different URL or redirects)
+        info = page_link_data.get(crawled_page["url"], {})
+        resolved_canon = info.get("resolved_canonical_url") or info.get(
+            "canonical_url"
+        )
+        has_canon_redirect = "canonical_redirect" in page_issue_types
+        has_cross_domain_canon = "cross_domain_canonical" in page_issue_types
+
+        is_noncanonical = False
+        target_canon_url: str | None = resolved_canon
+        if resolved_canon and _normalize_internal_url(resolved_canon) != norm_loc:
+            is_noncanonical = True
+        elif has_canon_redirect or has_cross_domain_canon:
+            is_noncanonical = True
+            for existing_i in page_issues:
+                if existing_i.get("type") in (
+                    "canonical_redirect",
+                    "cross_domain_canonical",
+                ):
+                    target_canon_url = existing_i.get(
+                        "destination_url"
+                    ) or existing_i.get("canonical_url")
+                    break
+        elif norm_loc in norm_redirects or page_status in (
+            301,
+            302,
+            303,
+            307,
+            308,
+        ):
+            is_noncanonical = True
+            target_canon_url = (
+                norm_redirects[norm_loc].get("destination_url")
+                if norm_loc in norm_redirects
+                else resolved_canon
+            )
+
+        if is_noncanonical and "sitemap_noncanonical_url" not in page_issue_types:
+            page_issue_types.add("sitemap_noncanonical_url")
+            page_issues.append(
+                {
+                    "type": "sitemap_noncanonical_url",
+                    "severity": "warning",
+                    "message": (
+                        f"Sitemap URL {raw_loc} points to a non-canonical page "
+                        f"(canonical URL is {target_canon_url}); include only "
+                        f"self-canonical URLs in the XML sitemap."
+                    ),
+                    "url": crawled_page["url"],
+                    "sitemap_url": raw_loc,
+                    "source_url": raw_loc,
+                    "destination_url": target_canon_url,
+                    "canonical_url": target_canon_url,
+                }
+            )
+
+    if uncrawled_sitemap_urls and "sitemap_url_not_crawled" not in primary_issue_types:
+        primary_issue_types.add("sitemap_url_not_crawled")
+        preview_urls = ", ".join(uncrawled_sitemap_urls[:5])
+        primary_issues.append(
+            {
+                "type": "sitemap_url_not_crawled",
+                "severity": "warning",
+                "message": (
+                    f"{len(uncrawled_sitemap_urls)} URL(s) listed in the XML sitemap "
+                    f"were not discovered or crawled during the crawl ({preview_urls}); "
+                    f"add internal links to these pages so crawlers and users can reach them."
+                ),
+                "url": primary_url,
+                "sitemap_url": uncrawled_sitemap_urls[0],
+                "sitemap_urls": list(uncrawled_sitemap_urls),
+                "sitemap_not_crawled_count": len(uncrawled_sitemap_urls),
+            }
+        )
+
+    # 5. Check crawled HTML pages missing from valid XML sitemap (crawled_url_missing_from_sitemap)
+    missing_from_sitemap_count = 0
+    if valid_sitemap_urls:
+        for page in html_pages:
+            page_url = page["url"]
+            norm_p = _normalize_internal_url(page_url)
+            if norm_p in sitemap_norm_set:
+                continue
+
+            page_issues = page.setdefault("seo_issues", [])
+            page_issue_types = {i.get("type") for i in page_issues}
+
+            # Skip pages that should NOT be in the sitemap (non-indexable, blocked by robots, or non-canonical)
+            if (
+                "noindex_page" in page_issue_types
+                or "robots_blocked_crawled_url" in page_issue_types
+                or "cross_domain_canonical" in page_issue_types
+                or "canonical_redirect" in page_issue_types
+            ):
+                continue
+
+            info = page_link_data.get(page_url, {})
+            resolved_canon = info.get("resolved_canonical_url") or info.get(
+                "canonical_url"
+            )
+            if resolved_canon and _normalize_internal_url(resolved_canon) != norm_p:
+                continue
+
+            missing_from_sitemap_count += 1
+            if "crawled_url_missing_from_sitemap" not in page_issue_types:
+                page_issue_types.add("crawled_url_missing_from_sitemap")
+                page_issues.append(
+                    {
+                        "type": "crawled_url_missing_from_sitemap",
+                        "severity": "warning",
+                        "message": (
+                            f"Crawled indexable HTML page {page_url} is missing "
+                            f"from the XML sitemap ({valid_sitemap_urls[0]}); "
+                            f"add this URL to your sitemap to improve search engine discovery."
+                        ),
+                        "url": page_url,
+                        "sitemap_url": valid_sitemap_urls[0],
+                    }
+                )
+    else:
+        missing_from_sitemap_count = len(html_pages)
+
+    sitemap_not_crawled_count = sum(
+        1 for norm_loc in internal_loc_norms if norm_loc not in norm_to_crawled_page
+    )
+    coverage = {
+        "sitemap_urls_count": len(internal_loc_norms),
+        "crawled_urls_count": len(html_pages),
+        "missing_from_sitemap_count": missing_from_sitemap_count,
+        "sitemap_not_crawled_count": sitemap_not_crawled_count,
+    }
+    return coverage
+
+
+def summarize_sitemap_coverage(
+    results: list[dict[str, Any]],
+) -> dict[str, int]:
+    """Calculate sitemap coverage summary statistics from crawled page results."""
+    html_pages = [
+        page
+        for page in results
+        if page.get("error") is None and is_html_content(page.get("content_type"))
+    ]
+    crawled_urls_count = len(html_pages)
+    crawled_norms = {_normalize_internal_url(p["url"]) for p in html_pages}
+
+    in_sitemap_crawled_count = sum(
+        1 for p in html_pages if p.get("in_sitemap") is True
+    )
+    missing_issue_pages = sum(
+        1
+        for p in html_pages
+        if any(
+            i.get("type") == "crawled_url_missing_from_sitemap"
+            for i in p.get("seo_issues", [])
+        )
+    )
+    has_missing_sitemap_issue = any(
+        i.get("type") in ("missing_sitemap", "invalid_sitemap")
+        for p in html_pages
+        for i in p.get("seo_issues", [])
+    )
+    if missing_issue_pages > 0:
+        missing_from_sitemap_count = missing_issue_pages
+    elif has_missing_sitemap_issue and in_sitemap_crawled_count == 0:
+        missing_from_sitemap_count = crawled_urls_count
+    else:
+        missing_from_sitemap_count = sum(
+            1
+            for p in html_pages
+            if p.get("in_sitemap") is False
+            and not any(
+                i.get("type")
+                in (
+                    "noindex_page",
+                    "robots_blocked_crawled_url",
+                    "cross_domain_canonical",
+                    "canonical_redirect",
+                )
+                for i in p.get("seo_issues", [])
+            )
+        )
+
+    uncrawled_norms: set[str] = set()
+    for page in results:
+        for issue in page.get("seo_issues", []):
+            issue_type = issue.get("type")
+            if issue_type == "sitemap_url_not_crawled":
+                for u in issue.get("sitemap_urls") or (
+                    [issue["sitemap_url"]] if issue.get("sitemap_url") else []
+                ):
+                    norm_u = _normalize_internal_url(u)
+                    if norm_u not in crawled_norms:
+                        uncrawled_norms.add(norm_u)
+            elif issue_type in (
+                "robots_blocked_sitemap_url",
+                "sitemap_non_indexable_url",
+                "sitemap_noncanonical_url",
+            ):
+                sm_u = issue.get("sitemap_url")
+                if sm_u:
+                    norm_u = _normalize_internal_url(sm_u)
+                    if norm_u not in crawled_norms:
+                        uncrawled_norms.add(norm_u)
+
+    sitemap_not_crawled_count = len(uncrawled_norms)
+    sitemap_urls_count = in_sitemap_crawled_count + sitemap_not_crawled_count
+
+    return {
+        "sitemap_urls_count": sitemap_urls_count,
+        "crawled_urls_count": crawled_urls_count,
+        "missing_from_sitemap_count": missing_from_sitemap_count,
+        "sitemap_not_crawled_count": sitemap_not_crawled_count,
+    }
+
+
 def crawl_website(
     start_url: str,
     max_pages: int = 10,
@@ -2745,6 +3716,7 @@ def crawl_website(
                     "content_type": content_type,
                     "response_time_ms": response_time_ms,
                     "page_size_bytes": page_size_bytes,
+                    "in_sitemap": False,
                     "seo_issues": seo_issues,
                     "error": None,
                 }
@@ -2979,6 +3951,7 @@ def crawl_website(
                     "content_type": None,
                     "response_time_ms": None,
                     "page_size_bytes": None,
+                    "in_sitemap": False,
                     "seo_issues": [],
                     "error": str(error),
                 }
@@ -3003,6 +3976,7 @@ def crawl_website(
                     "content_type": error.response.headers.get("content-type"),
                     "response_time_ms": response_time_ms,
                     "page_size_bytes": page_size_bytes,
+                    "in_sitemap": False,
                     "seo_issues": [],
                     "error": str(error),
                 }
@@ -3024,6 +3998,20 @@ def crawl_website(
     )
     total_crawl_duration = max(measured_crawl_duration, summed_page_seconds)
     detect_slow_crawl_issue(results, total_crawl_duration)
+    detect_sitemap_and_robots_issues(
+        results=results,
+        start_url=clean_start_url,
+        robots_url=robots_url,
+        robots_status_code=robots_response.status_code,
+        robots_text=robots_response.text,
+        robot_parser=robot_parser,
+        headers=headers,
+        page_link_data=page_link_data,
+        checked_redirects=checked_redirects,
+        initial_link_hops=initial_link_hops,
+        link_results=link_results,
+        user_agent=user_agent,
+    )
 
     successful_pages = sum(1 for item in results if item["error"] is None)
     print(

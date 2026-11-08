@@ -17,6 +17,7 @@ SAMPLE_PAGES = [
         "total_links": 12,
         "incoming_internal_links": 2,
         "outgoing_internal_links": 8,
+        "in_sitemap": True,
         "content_type": "text/html; charset=utf-8",
         "response_time_ms": 140.25,
         "page_size_bytes": 4096,
@@ -33,6 +34,7 @@ SAMPLE_PAGES = [
         "total_links": 0,
         "incoming_internal_links": 0,
         "outgoing_internal_links": 0,
+        "in_sitemap": False,
         "content_type": "text/html",
         "response_time_ms": 85.0,
         "page_size_bytes": 512,
@@ -49,6 +51,7 @@ SAMPLE_PAGES = [
         "total_links": 3,
         "incoming_internal_links": 1,
         "outgoing_internal_links": 2,
+        "in_sitemap": False,
         "content_type": "text/html",
         "response_time_ms": 2450.5,
         "page_size_bytes": 1572864,
@@ -162,6 +165,13 @@ SAMPLE_PAGES = [
                 "incoming_internal_links": 1,
                 "outgoing_internal_links": 2,
                 "depth": 1,
+            },
+            {
+                "type": "crawled_url_missing_from_sitemap",
+                "severity": "warning",
+                "message": "Crawled indexable HTML page is missing from the XML sitemap; add it so search engines can discover it reliably.",
+                "url": "https://example.com/café",
+                "sitemap_url": "https://example.com/sitemap.xml",
             },
         ],
         "error": None,
@@ -286,7 +296,7 @@ class PageExportTests(ExporterTestCase):
         self.assertIn("seo_issues", rows[0])
         self.assertEqual(json.loads(rows[0]["seo_issues"]), [])
         parsed_issues = json.loads(rows[2]["seo_issues"])
-        self.assertEqual(len(parsed_issues), 14)
+        self.assertEqual(len(parsed_issues), 15)
         self.assertEqual(parsed_issues[0]["type"], "missing_meta_description")
         self.assertEqual(parsed_issues[2]["type"], "duplicate_title")
         self.assertEqual(parsed_issues[3]["type"], "missing_image_alt")
@@ -333,6 +343,13 @@ class PageExportTests(ExporterTestCase):
         self.assertEqual(parsed_issues[13]["incoming_internal_links"], 1)
         self.assertEqual(parsed_issues[13]["outgoing_internal_links"], 2)
         self.assertEqual(parsed_issues[13]["depth"], 1)
+        self.assertEqual(
+            parsed_issues[14]["type"], "crawled_url_missing_from_sitemap"
+        )
+        self.assertEqual(
+            parsed_issues[14]["sitemap_url"],
+            "https://example.com/sitemap.xml",
+        )
 
         json_data = read_json(json_path)
         self.assertEqual(json_data[2]["seo_issues"], SAMPLE_PAGES[2]["seo_issues"])

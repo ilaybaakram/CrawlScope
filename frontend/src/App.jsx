@@ -17,6 +17,7 @@ const PAGE_FIELDS = [
   "content_type",
   "response_time_ms",
   "page_size_bytes",
+  "in_sitemap",
   "seo_issues",
   "error",
 ];
@@ -186,6 +187,13 @@ function App() {
   const seoIssues = pages.flatMap((page) =>
     Array.isArray(page.seo_issues) ? page.seo_issues : []
   );
+  const sitemapCoverage = crawlData?.sitemap_coverage || {
+    sitemap_urls_count: pages.filter((p) => p.in_sitemap).length,
+    crawled_urls_count: pages.length,
+    missing_from_sitemap_count: pages.filter((p) => p.in_sitemap === false)
+      .length,
+    sitemap_not_crawled_count: 0,
+  };
   const canDownload = Boolean(crawlData) && !isLoading;
 
   function handleDownloadPagesCsv() {
@@ -339,6 +347,34 @@ function App() {
 
       <section className="card">
         <div className="section-header">
+          <h2>Sitemap Coverage Summary</h2>
+          <div className="seo-metrics">
+            <span className="metric-badge">
+              URLs Listed in Sitemap:{" "}
+              <strong>{crawlData ? sitemapCoverage.sitemap_urls_count : 0}</strong>
+            </span>
+            <span className="metric-badge">
+              URLs Crawled:{" "}
+              <strong>{crawlData ? sitemapCoverage.crawled_urls_count : 0}</strong>
+            </span>
+            <span className="metric-badge">
+              URLs Missing from Sitemap:{" "}
+              <strong>
+                {crawlData ? sitemapCoverage.missing_from_sitemap_count : 0}
+              </strong>
+            </span>
+            <span className="metric-badge">
+              Sitemap URLs Not Crawled:{" "}
+              <strong>
+                {crawlData ? sitemapCoverage.sitemap_not_crawled_count : 0}
+              </strong>
+            </span>
+          </div>
+        </div>
+      </section>
+
+      <section className="card">
+        <div className="section-header">
           <h2>Download Crawl Results</h2>
           {!crawlData && (
             <span className="section-hint">
@@ -404,6 +440,7 @@ function App() {
                   <th>Links</th>
                   <th>Incoming Internal</th>
                   <th>Outgoing Internal</th>
+                  <th>In Sitemap</th>
                   <th>Response Time</th>
                   <th>Page Size</th>
                   <th>Content-Type</th>
@@ -439,6 +476,17 @@ function App() {
                     <td>{page.total_links ?? 0}</td>
                     <td>{page.incoming_internal_links ?? 0}</td>
                     <td>{page.outgoing_internal_links ?? 0}</td>
+                    <td>
+                      <span
+                        className={
+                          page.in_sitemap
+                            ? "status-pill status-ok"
+                            : "status-pill status-warning"
+                        }
+                      >
+                        {page.in_sitemap ? "Yes" : "No"}
+                      </span>
+                    </td>
                     <td>
                       {page.response_time_ms !== undefined &&
                       page.response_time_ms !== null
@@ -486,6 +534,7 @@ function App() {
                   <th>Depth</th>
                   <th>Incoming Internal</th>
                   <th>Outgoing Internal</th>
+                  <th>Sitemap URL</th>
                   <th>Canonical URL</th>
                   <th>Robots Directive</th>
                   <th>Schema Types</th>
@@ -546,6 +595,19 @@ function App() {
                       issue.outgoing_internal_links !== null
                         ? issue.outgoing_internal_links
                         : "—"}
+                    </td>
+                    <td className="url-cell">
+                      {issue.sitemap_url ? (
+                        <a
+                          href={issue.sitemap_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          {issue.sitemap_url}
+                        </a>
+                      ) : (
+                        "—"
+                      )}
                     </td>
                     <td className="url-cell">
                       {issue.canonical_url ? (

@@ -24,6 +24,7 @@ PAGE = {
     "total_links": 2,
     "incoming_internal_links": 0,
     "outgoing_internal_links": 1,
+    "in_sitemap": True,
     "content_type": "text/html",
     "response_time_ms": 125.4,
     "page_size_bytes": 2048,
