@@ -8,7 +8,13 @@ from urllib.robotparser import RobotFileParser
 
 import httpx
 from bs4 import BeautifulSoup
-from bs4.element import CData, Comment, Declaration, ProcessingInstruction
+from bs4.element import (
+    CData,
+    Comment,
+    Declaration,
+    NavigableString,
+    ProcessingInstruction,
+)
 
 from exporter import (
     export_links_to_csv,
@@ -1563,6 +1569,463 @@ def normalize_metadata_value(
     return collapsed.casefold()
 
 
+VAGUE_LINK_TEXTS = {
+    "click here",
+    "here",
+    "read more",
+    "more",
+    "learn more",
+    "link",
+    "this link",
+    "continue",
+    "continue reading",
+    "go",
+    "details",
+}
+
+
+def _get_attr_str(tag: Any, attr_name: str) -> str:
+    if not hasattr(tag, "get"):
+        return ""
+    raw = tag.get(attr_name)
+    if raw is None:
+        return ""
+    if isinstance(raw, list):
+        return " ".join(str(item) for item in raw).strip()
+    return str(raw).strip()
+
+
+def _is_element_hidden(tag: Any) -> bool:
+    current = tag
+    while current is not None and getattr(current, "name", None):
+        if hasattr(current, "has_attr") and current.has_attr("hidden"):
+            return True
+        aria_hidden = _get_attr_str(current, "aria-hidden").lower()
+        if aria_hidden == "true":
+            return True
+        style = _get_attr_str(current, "style").lower().replace(" ", "")
+        if "display:none" in style or "visibility:hidden" in style:
+            return True
+        current = getattr(current, "parent", None)
+    return False
+
+
+def _extract_visible_element_text(tag: Any) -> str:
+    if tag is None:
+        return ""
+    parts: list[str] = []
+    for descendant in tag.descendants:
+        if isinstance(
+            descendant, (CData, Comment, Declaration, ProcessingInstruction)
+        ):
+            continue
+        if isinstance(descendant, NavigableString):
+            parent = getattr(descendant, "parent", None)
+            skip = False
+            curr = parent
+            while curr is not None and getattr(curr, "name", None):
+                if curr.name.lower() in _NON_VISIBLE_TAGS:
+                    skip = True
+                    break
+                if hasattr(curr, "has_attr") and curr.has_attr("hidden"):
+                    skip = True
+                    break
+                if _get_attr_str(curr, "aria-hidden").lower() == "true":
+                    skip = True
+                    break
+                style = _get_attr_str(curr, "style").lower().replace(" ", "")
+                if "display:none" in style or "visibility:hidden" in style:
+                    skip = True
+                    break
+                curr = getattr(curr, "parent", None)
+            if not skip:
+                text = str(descendant).strip()
+                if text:
+                    parts.append(text)
+    return " ".join(" ".join(parts).split())
+
+
+def _resolve_aria_labelledby_text(soup: BeautifulSoup, raw_ids: str) -> str:
+    if not raw_ids or not raw_ids.strip():
+        return ""
+    parts: list[str] = []
+    for ref_id in raw_ids.split():
+        target = soup.find(id=ref_id)
+        if target is not None:
+            text = " ".join(target.get_text(separator=" ", strip=True).split())
+            if text:
+                parts.append(text)
+    return " ".join(parts).strip()
+
+
+def _get_accessible_name(tag: Any, soup: BeautifulSoup) -> str:
+    aria_labelledby = _get_attr_str(tag, "aria-labelledby")
+    if aria_labelledby:
+        resolved = _resolve_aria_labelledby_text(soup, aria_labelledby)
+        if resolved:
+            return resolved
+
+    aria_label = _get_attr_str(tag, "aria-label")
+    if aria_label:
+        return " ".join(aria_label.split())
+
+    visible_text = _extract_visible_element_text(tag)
+    if visible_text:
+        return visible_text
+
+    # Check child images, SVGs, or elements with aria-label / alt
+    for img in tag.find_all("img"):
+        if _is_element_hidden(img):
+            continue
+        alt_text = _get_attr_str(img, "alt")
+        if alt_text:
+            return " ".join(alt_text.split())
+        img_aria = _get_attr_str(img, "aria-label")
+        if img_aria:
+            return " ".join(img_aria.split())
+
+    for svg in tag.find_all("svg"):
+        if _is_element_hidden(svg):
+            continue
+        svg_aria = _get_attr_str(svg, "aria-label")
+        if svg_aria:
+            return " ".join(svg_aria.split())
+        svg_labelledby = _get_attr_str(svg, "aria-labelledby")
+        if svg_labelledby:
+            resolved_svg = _resolve_aria_labelledby_text(soup, svg_labelledby)
+            if resolved_svg:
+                return resolved_svg
+        title_tag = svg.find("title")
+        if title_tag is not None:
+            svg_title = " ".join(title_tag.get_text(separator=" ", strip=True).split())
+            if svg_title:
+                return svg_title
+
+    for child in tag.find_all(True):
+        if _is_element_hidden(child):
+            continue
+        child_aria = _get_attr_str(child, "aria-label")
+        if child_aria:
+            return " ".join(child_aria.split())
+
+    title_attr = _get_attr_str(tag, "title")
+    if title_attr:
+        return " ".join(title_attr.split())
+
+    return ""
+
+
+def _has_accessible_form_label(control: Any, soup: BeautifulSoup) -> bool:
+    aria_labelledby = _get_attr_str(control, "aria-labelledby")
+    if aria_labelledby and _resolve_aria_labelledby_text(soup, aria_labelledby):
+        return True
+
+    if _get_attr_str(control, "aria-label"):
+        return True
+
+    control_id = _get_attr_str(control, "id")
+    if control_id:
+        for label_tag in soup.find_all("label"):
+            if _get_attr_str(label_tag, "for") == control_id:
+                label_name = _get_accessible_name(label_tag, soup)
+                if label_name:
+                    return True
+
+    parent_label = control.find_parent("label")
+    if parent_label is not None:
+        label_name = _get_accessible_name(parent_label, soup)
+        if label_name:
+            return True
+
+    if _get_attr_str(control, "title"):
+        return True
+
+    return False
+
+
+def detect_accessibility_seo_issues(
+    url: str,
+    soup: BeautifulSoup,
+    content_type: str | None,
+) -> list[dict[str, Any]]:
+    if not is_html_content(content_type):
+        return []
+
+    issues: list[dict[str, Any]] = []
+
+    # 1. missing_lang: Root <html> element missing a valid lang attribute
+    html_tag = soup.find("html")
+    lang_value = ""
+    if html_tag is not None:
+        lang_value = _get_attr_str(html_tag, "lang") or _get_attr_str(
+            html_tag, "xml:lang"
+        )
+    if not lang_value:
+        issues.append(
+            {
+                "type": "missing_lang",
+                "severity": "warning",
+                "message": (
+                    "The root <html> element is missing a valid lang attribute "
+                    "(e.g., <html lang=\"en\">) to declare the page language for "
+                    "screen readers"
+                ),
+                "url": url,
+            }
+        )
+
+    # 2. missing_form_label: Form inputs lacking an associated accessible label
+    for control in soup.find_all(["input", "select", "textarea"]):
+        if _is_element_hidden(control):
+            continue
+
+        tag_name = control.name.lower()
+        input_type = "text"
+        if tag_name == "input":
+            raw_type = _get_attr_str(control, "type").lower()
+            input_type = raw_type if raw_type else "text"
+
+            # Hidden inputs do not need labels; button/submit/reset inputs are
+            # buttons rather than data-entry form fields.
+            if input_type in ("hidden", "button", "submit", "reset"):
+                continue
+
+            if input_type == "image":
+                has_image_name = bool(
+                    _get_attr_str(control, "alt")
+                    or _get_attr_str(control, "aria-label")
+                    or (
+                        _get_attr_str(control, "aria-labelledby")
+                        and _resolve_aria_labelledby_text(
+                            soup, _get_attr_str(control, "aria-labelledby")
+                        )
+                    )
+                    or _get_attr_str(control, "title")
+                )
+                if not has_image_name:
+                    issues.append(
+                        {
+                            "type": "missing_form_label",
+                            "severity": "warning",
+                            "message": (
+                                "Image input (<input type=\"image\">) is missing an "
+                                "alt attribute or ARIA label describing its action"
+                            ),
+                            "url": url,
+                        }
+                    )
+                continue
+
+        if not _has_accessible_form_label(control, soup):
+            control_name = (
+                _get_attr_str(control, "name")
+                or _get_attr_str(control, "id")
+                or (f"input[type={input_type}]" if tag_name == "input" else tag_name)
+            )
+            issues.append(
+                {
+                    "type": "missing_form_label",
+                    "severity": "warning",
+                    "message": (
+                        f"Form control '{control_name}' (<{tag_name}>) is missing an "
+                        f"associated <label>, aria-label, or aria-labelledby attribute"
+                    ),
+                    "url": url,
+                }
+            )
+
+    # 3. empty_link and 4. vague_link_text
+    for link in soup.find_all("a"):
+        if not link.has_attr("href"):
+            continue
+        if _is_element_hidden(link):
+            continue
+
+        accessible_name = _get_accessible_name(link, soup)
+        href_value = _get_attr_str(link, "href")
+        if not accessible_name:
+            issues.append(
+                {
+                    "type": "empty_link",
+                    "severity": "warning",
+                    "message": (
+                        f"Link to '{href_value or '(empty href)'}' has no accessible "
+                        f"name (provide visible text, image alt text, or aria-label)"
+                    ),
+                    "url": url,
+                }
+            )
+            continue
+
+        normalized_link_text = " ".join(accessible_name.split()).strip(
+            " .,!?:;'\"-_»›→()[]"
+        ).casefold()
+        if normalized_link_text in VAGUE_LINK_TEXTS:
+            issues.append(
+                {
+                    "type": "vague_link_text",
+                    "severity": "info",
+                    "message": (
+                        f"Link to '{href_value or '(empty href)'}' uses generic text "
+                        f"'{accessible_name}'; use descriptive anchor text that "
+                        f"explains the link destination"
+                    ),
+                    "url": url,
+                }
+            )
+
+    # 5. heading_hierarchy: Heading levels skip in a problematic way (e.g. H1 -> H3)
+    previous_level: int | None = None
+    for heading in soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6"]):
+        if _is_element_hidden(heading):
+            continue
+        current_level = int(heading.name[1])
+        if previous_level is not None and current_level > previous_level + 1:
+            heading_text = _get_accessible_name(heading, soup) or "(empty heading)"
+            issues.append(
+                {
+                    "type": "heading_hierarchy",
+                    "severity": "warning",
+                    "message": (
+                        f"Heading hierarchy skips from <h{previous_level}> to "
+                        f"<h{current_level}> ('{heading_text}'); use sequential "
+                        f"heading levels without skipping"
+                    ),
+                    "url": url,
+                }
+            )
+        previous_level = current_level
+
+    # 6. empty_button: Buttons lack an accessible name
+    seen_buttons: set[int] = set()
+    for button in soup.find_all("button"):
+        if _is_element_hidden(button):
+            continue
+        seen_buttons.add(id(button))
+        if not _get_accessible_name(button, soup):
+            issues.append(
+                {
+                    "type": "empty_button",
+                    "severity": "warning",
+                    "message": (
+                        "Button (<button>) has no accessible name; add visible text, "
+                        "an aria-label, or an accessible icon label"
+                    ),
+                    "url": url,
+                }
+            )
+
+    for input_btn in soup.find_all("input"):
+        if _is_element_hidden(input_btn):
+            continue
+        input_type = _get_attr_str(input_btn, "type").lower()
+        if input_type not in ("button", "submit", "reset"):
+            continue
+        seen_buttons.add(id(input_btn))
+
+        has_explicit_name = bool(
+            _get_attr_str(input_btn, "value")
+            or _get_attr_str(input_btn, "aria-label")
+            or (
+                _get_attr_str(input_btn, "aria-labelledby")
+                and _resolve_aria_labelledby_text(
+                    soup, _get_attr_str(input_btn, "aria-labelledby")
+                )
+            )
+            or _get_attr_str(input_btn, "title")
+        )
+        # Submit and reset inputs have browser-provided default labels ("Submit",
+        # "Reset") unless the author explicitly sets an empty value="".
+        if input_type in ("submit", "reset") and not input_btn.has_attr("value"):
+            has_explicit_name = True
+
+        if not has_explicit_name:
+            issues.append(
+                {
+                    "type": "empty_button",
+                    "severity": "warning",
+                    "message": (
+                        f"Button input (<input type=\"{input_type}\">) has no "
+                        f"accessible name; provide a non-empty value or aria-label"
+                    ),
+                    "url": url,
+                }
+            )
+
+    for role_btn in soup.find_all(attrs={"role": True}):
+        if id(role_btn) in seen_buttons:
+            continue
+        if _is_element_hidden(role_btn):
+            continue
+        role_tokens = _get_attr_str(role_btn, "role").lower().split()
+        if "button" not in role_tokens:
+            continue
+        if not _get_accessible_name(role_btn, soup):
+            issues.append(
+                {
+                    "type": "empty_button",
+                    "severity": "warning",
+                    "message": (
+                        f"Element <{role_btn.name} role=\"button\"> has no accessible "
+                        f"name; provide visible text or an aria-label"
+                    ),
+                    "url": url,
+                }
+            )
+
+    # 7. missing_landmark: Page lacks a main content landmark (<main> or role="main")
+    has_main_landmark = False
+    for main_tag in soup.find_all("main"):
+        if not _is_element_hidden(main_tag):
+            has_main_landmark = True
+            break
+    if not has_main_landmark:
+        for role_el in soup.find_all(attrs={"role": True}):
+            if _is_element_hidden(role_el):
+                continue
+            role_tokens = _get_attr_str(role_el, "role").lower().split()
+            if "main" in role_tokens:
+                has_main_landmark = True
+                break
+    if not has_main_landmark:
+        issues.append(
+            {
+                "type": "missing_landmark",
+                "severity": "info",
+                "message": (
+                    "Page is missing a main content landmark; wrap primary content "
+                    "in a <main> element or an element with role=\"main\""
+                ),
+                "url": url,
+            }
+        )
+
+    # 8. duplicate_id: Multiple elements share the same non-empty id attribute
+    id_counts: dict[str, int] = {}
+    for el in soup.find_all(attrs={"id": True}):
+        el_id = _get_attr_str(el, "id")
+        if not el_id:
+            continue
+        id_counts[el_id] = id_counts.get(el_id, 0) + 1
+
+    for dup_id, count in id_counts.items():
+        if count > 1:
+            issues.append(
+                {
+                    "type": "duplicate_id",
+                    "severity": "warning",
+                    "message": (
+                        f"Duplicate id '{dup_id}' appears {count} times on the page; "
+                        f"element IDs must be unique so label and ARIA references "
+                        f"work reliably"
+                    ),
+                    "url": url,
+                }
+            )
+
+    return issues
+
+
 def detect_duplicate_seo_issues(results: list[dict[str, Any]]) -> None:
     html_pages = [
         page
@@ -1958,6 +2421,13 @@ def crawl_website(
                     content_type=content_type,
                     response_time_seconds=response_time_seconds,
                     page_size_bytes=page_size_bytes,
+                )
+            )
+            seo_issues.extend(
+                detect_accessibility_seo_issues(
+                    url=current_url,
+                    soup=soup,
+                    content_type=content_type,
                 )
             )
 

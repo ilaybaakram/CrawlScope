@@ -101,6 +101,12 @@ SAMPLE_PAGE = {
             "response_time_ms": 2300.0,
             "page_size_bytes": 1572864,
         },
+        {
+            "type": "missing_lang",
+            "severity": "warning",
+            "message": "The root <html> element is missing a valid lang attribute (e.g., <html lang=\"en\">) to declare the page language for screen readers",
+            "url": "https://example.com/",
+        },
     ],
     "error": None,
 }
@@ -180,6 +186,7 @@ class FastAPIEndpointTests(unittest.TestCase):
                 "duplicate_schema_type",
                 "thin_content",
                 "slow_response",
+                "missing_lang",
             ],
         )
         self.assertEqual(

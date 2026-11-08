@@ -466,8 +466,8 @@ function App() {
         {seoIssues.length === 0 ? (
           <p className="empty-state">
             {crawlData
-              ? "No SEO metadata or image alt text issues detected in this crawl."
-              : "Missing or duplicate metadata and image alt text issues will appear here after a crawl."}
+              ? "No SEO or accessibility issues detected in this crawl."
+              : "SEO, content, performance, and accessibility audit issues will appear here after a crawl."}
           </p>
         ) : (
           <div className="table-wrapper">
@@ -492,9 +492,9 @@ function App() {
                 </tr>
               </thead>
               <tbody>
-                {seoIssues.map((issue) => (
+                {seoIssues.map((issue, index) => (
                   <tr
-                    key={`${issue.url}-${issue.type}-${issue.canonical_url || ""}-${issue.robots_directive || ""}-${issue.directive_source || ""}-${Array.isArray(issue.schema_types) ? issue.schema_types.join(",") : ""}-${issue.word_count ?? ""}-${issue.response_time_ms ?? ""}-${issue.page_size_bytes ?? ""}-${issue.image_url || ""}-${issue.source_url || ""}`}
+                    key={`${issue.url}-${issue.type}-${index}-${issue.message || ""}-${issue.canonical_url || ""}-${issue.robots_directive || ""}-${issue.directive_source || ""}-${Array.isArray(issue.schema_types) ? issue.schema_types.join(",") : ""}-${issue.word_count ?? ""}-${issue.response_time_ms ?? ""}-${issue.page_size_bytes ?? ""}-${issue.image_url || ""}-${issue.source_url || ""}`}
                   >
                     <td className="url-cell">
                       <a

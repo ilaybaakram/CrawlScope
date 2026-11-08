@@ -151,6 +151,7 @@ class CrawlLinkCheckTests(unittest.TestCase):
 class SeoAuditTests(unittest.TestCase):
     def crawl_single_page(self, html: str, content_type: str = "text/html; charset=utf-8"):
         if "text/html" in content_type and 'rel="canonical"' not in html:
+            html = html.replace("<html>", '<html lang="en">', 1)
             html = html.replace(
                 "<head>",
                 (
@@ -161,9 +162,10 @@ class SeoAuditTests(unittest.TestCase):
                 ),
                 1,
             )
+            html = html.replace("<body>", "<body><main>", 1)
             html = html.replace(
                 "</body>",
-                f"<p>{DEFAULT_BODY_WORDS}</p></body>",
+                f"<p>{DEFAULT_BODY_WORDS}</p></main></body>",
                 1,
             )
 
@@ -249,6 +251,7 @@ class DuplicateSeoAuditTests(unittest.TestCase):
     ):
         page_two_url = "https://example.com/page-2"
         if 'rel="canonical"' not in first_html:
+            first_html = first_html.replace("<html>", '<html lang="en">', 1)
             first_html = first_html.replace(
                 "<head>",
                 (
@@ -259,12 +262,14 @@ class DuplicateSeoAuditTests(unittest.TestCase):
                 ),
                 1,
             )
+            first_html = first_html.replace("<body>", "<body><main>", 1)
             first_html = first_html.replace(
                 "</body>",
-                f"<p>{DEFAULT_BODY_WORDS}</p></body>",
+                f"<p>{DEFAULT_BODY_WORDS}</p></main></body>",
                 1,
             )
         if "text/html" in second_content_type and 'rel="canonical"' not in second_html:
+            second_html = second_html.replace("<html>", '<html lang="en">', 1)
             second_html = second_html.replace(
                 "<head>",
                 (
@@ -275,9 +280,10 @@ class DuplicateSeoAuditTests(unittest.TestCase):
                 ),
                 1,
             )
+            second_html = second_html.replace("<body>", "<body><main>", 1)
             second_html = second_html.replace(
                 "</body>",
-                f"<p>{SECOND_BODY_WORDS}</p></body>",
+                f"<p>{SECOND_BODY_WORDS}</p></main></body>",
                 1,
             )
 
@@ -432,6 +438,7 @@ class ImageSeoAuditTests(unittest.TestCase):
         status_code: int = 200,
     ):
         if "text/html" in content_type and 'rel="canonical"' not in html:
+            html = html.replace("<html>", '<html lang="en">', 1)
             html = html.replace(
                 "<head>",
                 (
@@ -442,9 +449,10 @@ class ImageSeoAuditTests(unittest.TestCase):
                 ),
                 1,
             )
+            html = html.replace("<body>", "<body><main>", 1)
             html = html.replace(
                 "</body>",
-                f"<p>{DEFAULT_BODY_WORDS}</p></body>",
+                f"<p>{DEFAULT_BODY_WORDS}</p></main></body>",
                 1,
             )
 
@@ -694,13 +702,13 @@ class BrokenImageDetectionTests(unittest.TestCase):
 
     def test_image_request_failure_is_handled_gracefully(self):
         html = (
-            '<html><head><title>Title</title>'
+            '<html lang="en"><head><title>Title</title>'
             '<meta name="description" content="Desc">'
             f'<link rel="canonical" href="{START_URL}">'
             '<script type="application/ld+json">'
             '{"@context":"https://schema.org","@type":"WebPage"}'
             "</script></head>"
-            f'<body><h1>Heading</h1><p>{DEFAULT_BODY_WORDS}</p><img src="/timeout.png" alt="Timeout"></body></html>'
+            f'<body><main><h1>Heading</h1><p>{DEFAULT_BODY_WORDS}</p><img src="/timeout.png" alt="Timeout"></main></body></html>'
         )
 
         def fake_get(url, **_):
@@ -744,9 +752,9 @@ class BrokenImageDetectionTests(unittest.TestCase):
 
 class UrlSeoAuditTests(unittest.TestCase):
     COMPLETE_HTML = (
-        '<html><head><title>Valid Title</title>'
+        '<html lang="en"><head><title>Valid Title</title>'
         '<meta name="description" content="Valid description"></head>'
-        f"<body><h1>Valid H1</h1><p>{DEFAULT_BODY_WORDS}</p></body></html>"
+        f"<body><main><h1>Valid H1</h1><p>{DEFAULT_BODY_WORDS}</p></main></body></html>"
     )
 
     def crawl_url(self, target_url: str, **kwargs):
@@ -858,13 +866,13 @@ class RedirectAuditTests(unittest.TestCase):
         **kwargs,
     ):
         html = (
-            '<html><head><title>Home</title>'
+            '<html lang="en"><head><title>Home</title>'
             '<meta name="description" content="Home description">'
             f'<link rel="canonical" href="{START_URL}">'
             '<script type="application/ld+json">'
             '{"@context":"https://schema.org","@type":"WebPage"}'
             "</script></head>"
-            f"<body><h1>Home Heading</h1><p>{DEFAULT_BODY_WORDS}</p>{links_html}</body></html>"
+            f"<body><main><h1>Home Heading</h1><p>{DEFAULT_BODY_WORDS}</p>{links_html}</main></body></html>"
         )
         head_calls: list[str] = []
 
@@ -1118,13 +1126,13 @@ class CanonicalSeoAuditTests(unittest.TestCase):
         content_type: str = "text/html; charset=utf-8",
     ):
         html = (
-            f"<html><head><title>Page Title</title>"
+            f'<html lang="en"><head><title>Page Title</title>'
             f'<meta name="description" content="Page description">'
             '<script type="application/ld+json">'
             '{"@context":"https://schema.org","@type":"WebPage"}'
             "</script>"
             f"{head_tags}</head>"
-            f"<body><h1>Page Heading</h1><p>{DEFAULT_BODY_WORDS}</p></body></html>"
+            f"<body><main><h1>Page Heading</h1><p>{DEFAULT_BODY_WORDS}</p></main></body></html>"
         )
         head_calls: list[str] = []
 
@@ -1321,14 +1329,14 @@ class RobotsSeoAuditTests(unittest.TestCase):
         content_type: str = "text/html; charset=utf-8",
     ):
         html = (
-            f"<html><head><title>Page Title</title>"
+            f'<html lang="en"><head><title>Page Title</title>'
             f'<meta name="description" content="Page description">'
             f'<link rel="canonical" href="{START_URL}">'
             '<script type="application/ld+json">'
             '{"@context":"https://schema.org","@type":"WebPage"}'
             "</script>"
             f"{meta_tags}</head>"
-            f"<body><h1>Page Heading</h1><p>{DEFAULT_BODY_WORDS}</p></body></html>"
+            f"<body><main><h1>Page Heading</h1><p>{DEFAULT_BODY_WORDS}</p></main></body></html>"
         )
         headers: list[tuple[str, str]] = [("content-type", content_type)]
         if isinstance(x_robots_headers, str):
@@ -1495,11 +1503,11 @@ class StructuredDataSeoAuditTests(unittest.TestCase):
         content_type: str = "text/html; charset=utf-8",
     ):
         html = (
-            f"<html><head><title>Page Title</title>"
+            f'<html lang="en"><head><title>Page Title</title>'
             f'<meta name="description" content="Page description">'
             f'<link rel="canonical" href="{START_URL}">'
             f"{scripts_html}</head>"
-            f"<body><h1>Page Heading</h1><p>{DEFAULT_BODY_WORDS}</p></body></html>"
+            f"<body><main><h1>Page Heading</h1><p>{DEFAULT_BODY_WORDS}</p></main></body></html>"
         )
 
         def fake_get(url, **_):
@@ -1681,13 +1689,13 @@ class ContentQualitySeoAuditTests(unittest.TestCase):
         description: str = "Page description",
     ) -> str:
         return (
-            f"<html><head><title>{title}</title>"
+            f'<html lang="en"><head><title>{title}</title>'
             f'<meta name="description" content="{description}">'
             f'<link rel="canonical" href="{canonical_url}">'
             '<script type="application/ld+json">'
             '{"@context":"https://schema.org","@type":"WebPage"}'
             "</script></head>"
-            f"<body>{body_inner_html}</body></html>"
+            f"<body><main>{body_inner_html}</main></body></html>"
         )
 
     def crawl_single_page(
@@ -1909,15 +1917,15 @@ class ContentQualitySeoAuditTests(unittest.TestCase):
 class PerformanceSeoAuditTests(unittest.TestCase):
     def build_valid_html(self, target_size_bytes: int | None = None) -> str:
         prefix = (
-            "<html><head><title>Performance Page</title>"
+            '<html lang="en"><head><title>Performance Page</title>'
             '<meta name="description" content="Performance description">'
             f'<link rel="canonical" href="{START_URL}">'
             '<script type="application/ld+json">'
             '{"@context":"https://schema.org","@type":"WebPage"}'
             "</script></head>"
-            f"<body><h1>Performance Heading</h1><p>{DEFAULT_BODY_WORDS}</p><!--"
+            f"<body><main><h1>Performance Heading</h1><p>{DEFAULT_BODY_WORDS}</p><!--"
         )
-        suffix = "--></body></html>"
+        suffix = "--></main></body></html>"
         base_len = len((prefix + suffix).encode("utf-8"))
         if target_size_bytes is None or target_size_bytes <= base_len:
             return prefix + suffix
@@ -2073,6 +2081,271 @@ class PerformanceSeoAuditTests(unittest.TestCase):
         self.assertEqual(page["seo_issues"], [])
         self.assertEqual(page["page_size_bytes"], size_over_3mb)
         self.assertEqual(page["response_time_ms"], 500.0)
+
+
+class AccessibilitySeoAuditTests(unittest.TestCase):
+    def crawl_accessibility_page(
+        self,
+        body_inner_html: str = "",
+        html_open_tag: str = '<html lang="en">',
+        use_main_landmark: bool = True,
+        content_type: str = "text/html; charset=utf-8",
+    ):
+        main_content = (
+            f"<h1>Main Page Heading</h1><p>{DEFAULT_BODY_WORDS}</p>{body_inner_html}"
+        )
+        if use_main_landmark:
+            wrapped_body = f"<body><main>{main_content}</main></body>"
+        else:
+            wrapped_body = f"<body>{main_content}</body>"
+
+        html = (
+            f"{html_open_tag}<head><title>Accessible Page</title>"
+            '<meta name="description" content="Accessible page description">'
+            f'<link rel="canonical" href="{START_URL}">'
+            '<script type="application/ld+json">'
+            '{"@context":"https://schema.org","@type":"WebPage"}'
+            "</script></head>"
+            f"{wrapped_body}</html>"
+        )
+
+        def fake_get(url, **_):
+            if url.endswith("/robots.txt"):
+                return make_response("GET", url, 200, ROBOTS_TXT)
+            return httpx.Response(
+                200,
+                text=html,
+                headers={"content-type": content_type},
+                request=httpx.Request("GET", url),
+            )
+
+        with patch("crawler.httpx.get", side_effect=fake_get), \
+             patch("crawler.httpx.head", return_value=make_response("HEAD", START_URL, 200)), \
+             patch("crawler.time.sleep"):
+            pages = crawler.crawl_website(START_URL, max_pages=1, max_depth=0)
+        return pages[0]
+
+    def test_clean_accessible_page_produces_no_issues(self):
+        page = self.crawl_accessibility_page(
+            '<h2>Contact Us</h2>'
+            '<form>'
+            '  <label for="full-name">Full Name</label>'
+            '  <input id="full-name" name="name" type="text">'
+            '  <label>Email <input name="email" type="email"></label>'
+            '  <input type="hidden" name="csrf" value="token123">'
+            '  <input type="submit" value="Send Message">'
+            '  <button type="button">Cancel</button>'
+            '</form>'
+            '<a href="/pricing">View Pricing Plans</a>'
+        )
+        self.assertEqual(page["seo_issues"], [])
+
+    def test_missing_lang_attribute_on_html_is_detected(self):
+        for tag in ("<html>", '<html lang="">', '<html lang="   ">'):
+            page = self.crawl_accessibility_page(html_open_tag=tag)
+            self.assertEqual(len(page["seo_issues"]), 1)
+            issue = page["seo_issues"][0]
+            self.assertEqual(issue["type"], "missing_lang")
+            self.assertEqual(issue["severity"], "warning")
+            self.assertEqual(issue["url"], START_URL)
+            self.assertIn("lang", issue["message"])
+
+        # xml:lang is also accepted as a valid language declaration
+        xml_lang_page = self.crawl_accessibility_page(
+            html_open_tag='<html xml:lang="en-US">'
+        )
+        self.assertEqual(xml_lang_page["seo_issues"], [])
+
+    def test_missing_form_label_and_accessible_form_label_variants(self):
+        # Unlabeled text input, select, textarea, and image input without alt
+        bad_page = self.crawl_accessibility_page(
+            '<form>'
+            '  <input type="text" name="username">'
+            '  <select name="country"><option>USA</option></select>'
+            '  <textarea id="bio"></textarea>'
+            '  <input type="image" src="/ok-btn.png">'
+            '</form>'
+        )
+        label_issues = [
+            i for i in bad_page["seo_issues"] if i["type"] == "missing_form_label"
+        ]
+        self.assertEqual(len(label_issues), 4)
+        for issue in label_issues:
+            self.assertEqual(issue["severity"], "warning")
+            self.assertEqual(issue["url"], START_URL)
+
+        # Positive cases: label[for], wrapping label, aria-label, aria-labelledby,
+        # title, hidden inputs, submit/reset/button inputs, and image input with alt
+        good_page = self.crawl_accessibility_page(
+            '<span id="search-lbl">Search Documentation</span>'
+            '<form>'
+            '  <label for="user-field">Username</label>'
+            '  <input id="user-field" type="text">'
+            '  <label>Topic <select name="topic"><option>SEO</option></select></label>'
+            '  <input type="search" aria-labelledby="search-lbl">'
+            '  <textarea aria-label="Additional comments"></textarea>'
+            '  <input type="text" title="Filter results">'
+            '  <input type="hidden" name="session_id" value="1">'
+            '  <input type="text" name="hidden_field" hidden>'
+            '  <input type="text" name="aria_hidden_field" aria-hidden="true">'
+            '  <input type="submit">'
+            '  <input type="reset">'
+            '  <input type="button" value="Reset Filters">'
+            '  <input type="image" src="/submit.png" alt="Submit form">'
+            '</form>'
+        )
+        self.assertEqual(good_page["seo_issues"], [])
+
+    def test_empty_link_and_accessible_link_names(self):
+        bad_page = self.crawl_accessibility_page(
+            '<a href="/empty"></a>'
+            '<a href="/whitespace">   \n\t  </a>'
+            '<a href="/hidden-only"><span aria-hidden="true">Hidden text</span></a>'
+        )
+        empty_links = [
+            i for i in bad_page["seo_issues"] if i["type"] == "empty_link"
+        ]
+        self.assertEqual(len(empty_links), 3)
+        for issue in empty_links:
+            self.assertEqual(issue["severity"], "warning")
+            self.assertEqual(issue["url"], START_URL)
+
+        # Positive cases: aria-label, aria-labelledby, child img alt, SVG title, title
+        good_page = self.crawl_accessibility_page(
+            '<span id="nav-home">Home Dashboard</span>'
+            '<a href="/home" aria-labelledby="nav-home"></a>'
+            '<a href="/profile" aria-label="User Profile"></a>'
+            '<a href="/gallery"><img src="/thumb.jpg" alt="View photo gallery"></a>'
+            '<a href="/feed"><svg><title>RSS Feed</title></svg></a>'
+            '<a href="/settings" title="Account Settings"></a>'
+            '<a name="anchor-without-href"></a>'
+        )
+        # Mock image status for /thumb.jpg by filtering only accessibility issues
+        a11y_issues = [
+            i
+            for i in good_page["seo_issues"]
+            if i["type"] in ("empty_link", "vague_link_text")
+        ]
+        self.assertEqual(a11y_issues, [])
+
+    def test_vague_link_text_is_detected(self):
+        page = self.crawl_accessibility_page(
+            '<a href="/doc-1">Click here</a>'
+            '<a href="/doc-2">  read more... </a>'
+            '<a href="/doc-3">HERE!</a>'
+            '<a href="/doc-4">Learn more →</a>'
+            '<a href="/doc-5">Read our complete SEO auditing guide</a>'
+        )
+        vague_issues = [
+            i for i in page["seo_issues"] if i["type"] == "vague_link_text"
+        ]
+        self.assertEqual(len(vague_issues), 4)
+        for issue in vague_issues:
+            self.assertEqual(issue["severity"], "info")
+            self.assertEqual(issue["url"], START_URL)
+
+    def test_heading_hierarchy_skips_are_detected(self):
+        # H1 (from helper) -> H3 skips H2; then H3 -> H5 skips H4
+        bad_page = self.crawl_accessibility_page(
+            "<h3>Skipped H2 Section</h3>"
+            "<h5>Skipped H4 Subsection</h5>"
+        )
+        hierarchy_issues = [
+            i for i in bad_page["seo_issues"] if i["type"] == "heading_hierarchy"
+        ]
+        self.assertEqual(len(hierarchy_issues), 2)
+        self.assertEqual(hierarchy_issues[0]["severity"], "warning")
+        self.assertIn("<h1> to <h3>", hierarchy_issues[0]["message"])
+        self.assertIn("<h3> to <h5>", hierarchy_issues[1]["message"])
+
+        # Valid hierarchy: H1 -> H2 -> H3 -> H2 -> H3 (moving up to H2 is valid)
+        good_page = self.crawl_accessibility_page(
+            "<h2>Section One</h2>"
+            "<h3>Subsection A</h3>"
+            "<h2>Section Two</h2>"
+            "<h3>Subsection B</h3>"
+        )
+        self.assertEqual(good_page["seo_issues"], [])
+
+    def test_empty_button_and_accessible_button_variants(self):
+        bad_page = self.crawl_accessibility_page(
+            "<button></button>"
+            "<button>   </button>"
+            '<input type="button">'
+            '<input type="submit" value="   ">'
+            '<div role="button"></div>'
+        )
+        button_issues = [
+            i for i in bad_page["seo_issues"] if i["type"] == "empty_button"
+        ]
+        self.assertEqual(len(button_issues), 5)
+        for issue in button_issues:
+            self.assertEqual(issue["severity"], "warning")
+            self.assertEqual(issue["url"], START_URL)
+
+        # Positive cases: visible text, aria-label, aria-labelledby, svg title, input value
+        good_page = self.crawl_accessibility_page(
+            '<span id="close-modal-lbl">Close Modal</span>'
+            "<button>Save Changes</button>"
+            '<button aria-label="Open menu"></button>'
+            '<button aria-labelledby="close-modal-lbl"></button>'
+            "<button><svg><title>Search</title></svg></button>"
+            '<input type="button" value="Apply">'
+            '<input type="submit">'
+            '<div role="button" aria-label="Toggle theme"></div>'
+            "<button hidden></button>"
+        )
+        self.assertEqual(good_page["seo_issues"], [])
+
+    def test_missing_landmark_and_valid_main_landmarks(self):
+        no_landmark_page = self.crawl_accessibility_page(
+            use_main_landmark=False
+        )
+        self.assertEqual(len(no_landmark_page["seo_issues"]), 1)
+        issue = no_landmark_page["seo_issues"][0]
+        self.assertEqual(issue["type"], "missing_landmark")
+        self.assertEqual(issue["severity"], "info")
+        self.assertEqual(issue["url"], START_URL)
+
+        # role="main" satisfies the landmark check even without <main>
+        role_main_page = self.crawl_accessibility_page(
+            body_inner_html='<div role="main"><p>Primary content</p></div>',
+            use_main_landmark=False,
+        )
+        self.assertEqual(role_main_page["seo_issues"], [])
+
+    def test_duplicate_id_is_detected(self):
+        bad_page = self.crawl_accessibility_page(
+            '<div id="shared-id">First</div>'
+            '<section id="shared-id">Second</section>'
+            '<p id="unique-id">Unique</p>'
+        )
+        dup_id_issues = [
+            i for i in bad_page["seo_issues"] if i["type"] == "duplicate_id"
+        ]
+        self.assertEqual(len(dup_id_issues), 1)
+        issue = dup_id_issues[0]
+        self.assertEqual(issue["severity"], "warning")
+        self.assertEqual(issue["url"], START_URL)
+        self.assertIn("shared-id", issue["message"])
+        self.assertIn("2 times", issue["message"])
+
+    def test_malformed_html_and_non_html_pages_handled_safely(self):
+        # Malformed HTML should not crash the accessibility audit
+        malformed_page = self.crawl_accessibility_page(
+            '<div><form><input type="text" name="unclosed"><a href="/broken">'
+        )
+        issue_types = [i["type"] for i in malformed_page["seo_issues"]]
+        self.assertIn("missing_form_label", issue_types)
+        self.assertIn("empty_link", issue_types)
+
+        # Non-HTML page should not trigger accessibility checks
+        non_html_page = self.crawl_accessibility_page(
+            html_open_tag="<html>",
+            use_main_landmark=False,
+            content_type="application/json",
+        )
+        self.assertEqual(non_html_page["seo_issues"], [])
 
 
 if __name__ == "__main__":

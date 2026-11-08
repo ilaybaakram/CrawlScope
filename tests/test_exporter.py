@@ -142,6 +142,12 @@ SAMPLE_PAGES = [
                 "response_time_ms": 2450.5,
                 "page_size_bytes": 1572864,
             },
+            {
+                "type": "missing_lang",
+                "severity": "warning",
+                "message": "The root <html> element is missing a valid lang attribute (e.g., <html lang=\"en\">) to declare the page language for screen readers",
+                "url": "https://example.com/café",
+            },
         ],
         "error": None,
     },
@@ -265,7 +271,7 @@ class PageExportTests(ExporterTestCase):
         self.assertIn("seo_issues", rows[0])
         self.assertEqual(json.loads(rows[0]["seo_issues"]), [])
         parsed_issues = json.loads(rows[2]["seo_issues"])
-        self.assertEqual(len(parsed_issues), 12)
+        self.assertEqual(len(parsed_issues), 13)
         self.assertEqual(parsed_issues[0]["type"], "missing_meta_description")
         self.assertEqual(parsed_issues[2]["type"], "duplicate_title")
         self.assertEqual(parsed_issues[3]["type"], "missing_image_alt")
@@ -306,6 +312,8 @@ class PageExportTests(ExporterTestCase):
         self.assertEqual(parsed_issues[11]["type"], "slow_response")
         self.assertEqual(parsed_issues[11]["response_time_ms"], 2450.5)
         self.assertEqual(parsed_issues[11]["page_size_bytes"], 1572864)
+        self.assertEqual(parsed_issues[12]["type"], "missing_lang")
+        self.assertEqual(parsed_issues[12]["severity"], "warning")
 
         json_data = read_json(json_path)
         self.assertEqual(json_data[2]["seo_issues"], SAMPLE_PAGES[2]["seo_issues"])
