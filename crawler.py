@@ -3,7 +3,7 @@ import time
 from collections import deque
 from pathlib import Path
 from typing import Any
-from urllib.parse import urldefrag, urljoin, urlparse
+from urllib.parse import urldefrag, urljoin, urlparse, urlunparse
 from urllib.robotparser import RobotFileParser
 
 import httpx
@@ -2082,6 +2082,515 @@ def detect_duplicate_seo_issues(results: list[dict[str, Any]]) -> None:
                 )
 
 
+# Thresholds for Internal Link Structure & Crawlability Audit:
+# - Pages (excluding start_url) with fewer than 3 incoming internal links from
+#   other crawled pages have weak internal link support.
+# - Pages more than 4 clicks/levels deep from the start URL are harder for
+#   users and search engines to reach.
+# - Pages with more than 100 unique outgoing internal links dilute link equity.
+LOW_INTERNAL_LINK_COUNT_THRESHOLD = 3
+DEEP_PAGE_DEPTH_THRESHOLD = 4
+EXCESSIVE_INTERNAL_LINKS_THRESHOLD = 100
+
+
+def _normalize_internal_url(url: str) -> str:
+    clean_url, _ = urldefrag(str(url).strip())
+    try:
+        parsed = urlparse(clean_url)
+    except ValueError:
+        return clean_url
+    if not parsed.scheme or not parsed.hostname:
+        return clean_url
+    hostname = parsed.hostname.lower()
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    netloc = f"{hostname}:{port}" if port is not None else hostname
+    if parsed.username:
+        userinfo = parsed.username
+        if parsed.password:
+            userinfo = f"{userinfo}:{parsed.password}"
+        netloc = f"{userinfo}@{netloc}"
+    return urlunparse(
+        (
+            parsed.scheme.lower(),
+            netloc,
+            parsed.path or "",
+            parsed.params or "",
+            parsed.query or "",
+            "",
+        )
+    )
+
+
+def _extract_rel_tokens(tag: Any) -> set[str]:
+    if not hasattr(tag, "get"):
+        return set()
+    raw_rel = tag.get("rel")
+    if raw_rel is None:
+        return set()
+    if isinstance(raw_rel, (list, tuple)):
+        tokens: set[str] = set()
+        for item in raw_rel:
+            for part in str(item).split():
+                if part.strip():
+                    tokens.add(part.strip().lower())
+        return tokens
+    return {
+        part.strip().lower()
+        for part in str(raw_rel).split()
+        if part.strip()
+    }
+
+
+def _extract_page_internal_link_data(
+    page_url: str,
+    soup: BeautifulSoup,
+    target_hostname: str | None,
+    response_headers: Any = None,
+) -> dict[str, Any]:
+    normalized_self = _normalize_internal_url(page_url)
+    target_host = (
+        target_hostname or urlparse(page_url).hostname or ""
+    ).casefold()
+
+    outgoing_urls: list[str] = []
+    seen_outgoing: set[str] = set()
+    nofollow_internal_urls: list[str] = []
+    seen_nofollow: set[str] = set()
+
+    for tag in soup.find_all("a"):
+        raw_href = tag.get("href")
+        if raw_href is None:
+            continue
+        resolved_url, is_valid = _resolve_canonical_url(page_url, raw_href)
+        if not is_valid or not resolved_url:
+            continue
+        parsed_link = urlparse(resolved_url)
+        if (parsed_link.hostname or "").casefold() != target_host:
+            continue
+
+        normalized_target = _normalize_internal_url(resolved_url)
+        rel_tokens = _extract_rel_tokens(tag)
+        if "nofollow" in rel_tokens:
+            if normalized_target not in seen_nofollow:
+                seen_nofollow.add(normalized_target)
+                nofollow_internal_urls.append(normalized_target)
+
+        # Exclude self-links from outgoing/incoming inter-page link counts
+        if normalized_target == normalized_self:
+            continue
+
+        if normalized_target not in seen_outgoing:
+            seen_outgoing.add(normalized_target)
+            outgoing_urls.append(normalized_target)
+
+    canonical_url: str | None = None
+    canonical_tags = _find_canonical_link_tags(soup)
+    if len(canonical_tags) == 1:
+        resolved_canon, canon_valid = _resolve_canonical_url(
+            page_url, canonical_tags[0].get("href")
+        )
+        if canon_valid and resolved_canon:
+            canon_host = (urlparse(resolved_canon).hostname or "").casefold()
+            if canon_host == target_host:
+                canonical_url = _normalize_internal_url(resolved_canon)
+
+    # Check if page has any meta robots / X-Robots-Tag directive preventing link following
+    has_nofollow_directive = False
+    nofollow_directives: list[str] = []
+    nofollow_sources: list[str] = []
+
+    for tag in soup.find_all("meta"):
+        raw_name = tag.get("name")
+        raw_content = tag.get("content")
+        if not isinstance(raw_name, str) or raw_content is None:
+            continue
+        bot_name = raw_name.strip().lower()
+        if bot_name in ("robots", "googlebot", "bingbot", "slurp"):
+            cleaned_content = str(raw_content).strip()
+            if not cleaned_content:
+                continue
+            tokens = _parse_robots_directives(cleaned_content)
+            if "nofollow" in tokens:
+                has_nofollow_directive = True
+                nofollow_directives.append(cleaned_content)
+                source_label = f"meta_{bot_name}"
+                if source_label not in nofollow_sources:
+                    nofollow_sources.append(source_label)
+
+    for header_val in _extract_x_robots_headers(response_headers):
+        tokens = _parse_robots_directives(header_val)
+        if "nofollow" in tokens:
+            has_nofollow_directive = True
+            nofollow_directives.append(header_val)
+            if "x_robots_tag" not in nofollow_sources:
+                nofollow_sources.append("x_robots_tag")
+
+    return {
+        "outgoing_urls": outgoing_urls,
+        "nofollow_internal_urls": nofollow_internal_urls,
+        "canonical_url": canonical_url,
+        "has_nofollow_directive": has_nofollow_directive,
+        "nofollow_directive": " | ".join(nofollow_directives)
+        if nofollow_directives
+        else None,
+        "directive_source": ", ".join(nofollow_sources)
+        if nofollow_sources
+        else None,
+    }
+
+
+def _find_isolated_sections(
+    html_page_urls: list[str],
+    start_page_url: str,
+    crawled_outgoing: dict[str, set[str]],
+) -> dict[str, tuple[list[str], int]]:
+    """Identify pages belonging to isolated multi-page sections in the crawled link graph."""
+    if len(html_page_urls) < 3:
+        return {}
+
+    url_set = set(html_page_urls)
+    order_index = {u: idx for idx, u in enumerate(html_page_urls)}
+    isolated_map: dict[str, tuple[list[str], int]] = {}
+
+    # 1. Check weakly connected components that do not contain start_page_url
+    undirected_adj: dict[str, set[str]] = {u: set() for u in html_page_urls}
+    for u, targets in crawled_outgoing.items():
+        for v in targets:
+            if v in url_set and v != u:
+                undirected_adj[u].add(v)
+                undirected_adj[v].add(u)
+
+    visited_weak: set[str] = set()
+    for node in html_page_urls:
+        if node in visited_weak:
+            continue
+        comp: set[str] = set()
+        bfs_queue = deque([node])
+        visited_weak.add(node)
+        while bfs_queue:
+            curr = bfs_queue.popleft()
+            comp.add(curr)
+            for neighbor in undirected_adj[curr]:
+                if neighbor not in visited_weak:
+                    visited_weak.add(neighbor)
+                    bfs_queue.append(neighbor)
+
+        if start_page_url not in comp and len(comp) >= 2:
+            sorted_comp = sorted(comp, key=lambda u: order_index[u])
+            for member in sorted_comp:
+                isolated_map[member] = (sorted_comp, 0)
+
+    # 2. Check Strongly Connected Components (SCCs) of size >= 2 (excluding
+    # start_page_url's SCC) that have 0 outgoing links to the rest of the site
+    # and at most 1 incoming link from outside the component.
+    reachable: dict[str, set[str]] = {}
+    for u in html_page_urls:
+        seen_r: set[str] = {u}
+        q_r = deque([u])
+        while q_r:
+            curr = q_r.popleft()
+            for nxt in crawled_outgoing.get(curr, set()):
+                if nxt in url_set and nxt not in seen_r:
+                    seen_r.add(nxt)
+                    q_r.append(nxt)
+        reachable[u] = seen_r
+
+    visited_scc: set[str] = set()
+    for u in html_page_urls:
+        if u in visited_scc:
+            continue
+        scc = {
+            v
+            for v in html_page_urls
+            if v in reachable[u] and u in reachable[v]
+        }
+        visited_scc.update(scc)
+
+        if start_page_url in scc or len(scc) < 2:
+            continue
+
+        outside_outgoing = sum(
+            1
+            for member in scc
+            for target in crawled_outgoing.get(member, set())
+            if target in url_set and target not in scc
+        )
+        outside_incoming = sum(
+            1
+            for other in html_page_urls
+            if other not in scc
+            for target in crawled_outgoing.get(other, set())
+            if target in scc
+        )
+
+        if outside_outgoing == 0 and outside_incoming <= 1:
+            sorted_scc = sorted(scc, key=lambda item: order_index[item])
+            for member in sorted_scc:
+                if member not in isolated_map:
+                    isolated_map[member] = (sorted_scc, outside_incoming)
+
+    return isolated_map
+
+
+def detect_internal_link_structure_issues(
+    results: list[dict[str, Any]],
+    start_url: str,
+    page_link_data: dict[str, dict[str, Any]] | None = None,
+) -> None:
+    if page_link_data is None:
+        page_link_data = {}
+
+    for page in results:
+        page.setdefault("incoming_internal_links", 0)
+        page.setdefault("outgoing_internal_links", 0)
+
+    html_pages = [
+        page
+        for page in results
+        if page.get("error") is None and is_html_content(page.get("content_type"))
+    ]
+    if not html_pages:
+        return
+
+    clean_start_norm = _normalize_internal_url(start_url)
+
+    # Map normalized URLs and unambiguous same-domain canonical URLs to crawled page URLs
+    norm_to_page_url: dict[str, str] = {}
+    for page in html_pages:
+        page_url = page["url"]
+        norm_to_page_url[_normalize_internal_url(page_url)] = page_url
+
+    for page in html_pages:
+        page_url = page["url"]
+        info = page_link_data.get(page_url, {})
+        canon_norm = info.get("canonical_url")
+        if canon_norm and canon_norm not in norm_to_page_url:
+            norm_to_page_url[canon_norm] = page_url
+
+    start_page_url = norm_to_page_url.get(clean_start_norm, clean_start_norm)
+    html_page_urls = [page["url"] for page in html_pages]
+    html_url_set = set(html_page_urls)
+
+    incoming_sources: dict[str, set[str]] = {u: set() for u in html_page_urls}
+    crawled_outgoing: dict[str, set[str]] = {u: set() for u in html_page_urls}
+    resolved_outgoing_by_page: dict[str, list[str]] = {}
+
+    for page in html_pages:
+        page_url = page["url"]
+        info = page_link_data.get(page_url, {})
+        raw_outgoing = info.get("outgoing_urls", [])
+
+        dedup_outgoing: list[str] = []
+        seen_targets: set[str] = set()
+        for target_norm in raw_outgoing:
+            mapped_target = norm_to_page_url.get(target_norm, target_norm)
+            if mapped_target == page_url:
+                continue
+            if mapped_target not in seen_targets:
+                seen_targets.add(mapped_target)
+                dedup_outgoing.append(mapped_target)
+
+        resolved_outgoing_by_page[page_url] = dedup_outgoing
+        page["outgoing_internal_links"] = len(dedup_outgoing)
+
+        for target_url in dedup_outgoing:
+            if target_url in html_url_set and target_url != page_url:
+                incoming_sources[target_url].add(page_url)
+                crawled_outgoing[page_url].add(target_url)
+
+    for page in html_pages:
+        page_url = page["url"]
+        page["incoming_internal_links"] = len(incoming_sources[page_url])
+
+    isolated_sections = _find_isolated_sections(
+        html_page_urls=html_page_urls,
+        start_page_url=start_page_url,
+        crawled_outgoing=crawled_outgoing,
+    )
+
+    for page in html_pages:
+        page_url = page["url"]
+        page_depth = page.get("depth", 0)
+        incoming_count = page["incoming_internal_links"]
+        outgoing_count = page["outgoing_internal_links"]
+        info = page_link_data.get(page_url, {})
+
+        seo_issues = page.setdefault("seo_issues", [])
+        existing_types = {issue.get("type") for issue in seo_issues}
+        is_start_page = (
+            page_url == start_page_url
+            or _normalize_internal_url(page_url) == clean_start_norm
+        )
+
+        # 1. orphan_page: 0 incoming internal links from other crawled pages (excluding start_url)
+        if (
+            not is_start_page
+            and incoming_count == 0
+            and "orphan_page" not in existing_types
+        ):
+            existing_types.add("orphan_page")
+            seo_issues.append(
+                {
+                    "type": "orphan_page",
+                    "severity": "warning",
+                    "message": (
+                        "Crawled page has 0 incoming internal links from other "
+                        "crawled pages; add internal links from relevant pages "
+                        "so users and search engines can discover it."
+                    ),
+                    "url": page_url,
+                    "incoming_internal_links": incoming_count,
+                    "outgoing_internal_links": outgoing_count,
+                    "depth": page_depth,
+                }
+            )
+
+        # 2. low_internal_link_count: fewer than 3 incoming internal links from other crawled pages
+        if (
+            not is_start_page
+            and len(html_pages) >= LOW_INTERNAL_LINK_COUNT_THRESHOLD
+            and 0 < incoming_count < LOW_INTERNAL_LINK_COUNT_THRESHOLD
+            and "orphan_page" not in existing_types
+            and "low_internal_link_count" not in existing_types
+        ):
+            existing_types.add("low_internal_link_count")
+            seo_issues.append(
+                {
+                    "type": "low_internal_link_count",
+                    "severity": "warning",
+                    "message": (
+                        f"Page has only {incoming_count} incoming internal "
+                        f"link(s) from other crawled pages (recommended "
+                        f"minimum is {LOW_INTERNAL_LINK_COUNT_THRESHOLD}); add "
+                        f"contextual internal links to improve crawlability."
+                    ),
+                    "url": page_url,
+                    "incoming_internal_links": incoming_count,
+                    "outgoing_internal_links": outgoing_count,
+                    "depth": page_depth,
+                }
+            )
+
+        # 3. deep_page: more than 4 link-depth levels away from starting URL
+        if (
+            page_depth > DEEP_PAGE_DEPTH_THRESHOLD
+            and "deep_page" not in existing_types
+        ):
+            existing_types.add("deep_page")
+            seo_issues.append(
+                {
+                    "type": "deep_page",
+                    "severity": "warning",
+                    "message": (
+                        f"Page is {page_depth} link-depth levels away from the "
+                        f"starting URL (recommended maximum is "
+                        f"{DEEP_PAGE_DEPTH_THRESHOLD}); flatten site "
+                        f"architecture so key pages are reachable in fewer "
+                        f"clicks."
+                    ),
+                    "url": page_url,
+                    "depth": page_depth,
+                    "incoming_internal_links": incoming_count,
+                    "outgoing_internal_links": outgoing_count,
+                }
+            )
+
+        # 4. nofollow_internal_link: internal links on the page use rel="nofollow"
+        nofollow_urls = info.get("nofollow_internal_urls", [])
+        if nofollow_urls and "nofollow_internal_link" not in existing_types:
+            existing_types.add("nofollow_internal_link")
+            seo_issues.append(
+                {
+                    "type": "nofollow_internal_link",
+                    "severity": "warning",
+                    "message": (
+                        f"Page has {len(nofollow_urls)} internal link(s) with "
+                        f'rel="nofollow" ({", ".join(nofollow_urls)}); remove '
+                        f"nofollow on internal links so search engines can "
+                        f"follow them and pass link equity."
+                    ),
+                    "url": page_url,
+                    "nofollow_links": list(nofollow_urls),
+                    "outgoing_internal_links": outgoing_count,
+                    "depth": page_depth,
+                }
+            )
+
+        # 5. nofollow_page: page-level directive prevents following links (if not already emitted)
+        if (
+            info.get("has_nofollow_directive")
+            and "nofollow_page" not in existing_types
+        ):
+            existing_types.add("nofollow_page")
+            directive_val = info.get("nofollow_directive") or "nofollow"
+            source_val = info.get("directive_source") or "meta_robots"
+            seo_issues.append(
+                {
+                    "type": "nofollow_page",
+                    "severity": "warning",
+                    "message": (
+                        f"Page prevents search engines from following links via "
+                        f"{source_val}: {directive_val}"
+                    ),
+                    "url": page_url,
+                    "robots_directive": directive_val,
+                    "directive_source": source_val,
+                }
+            )
+
+        # 6. excessive_internal_links: more than 100 unique internal links on the page
+        if (
+            outgoing_count > EXCESSIVE_INTERNAL_LINKS_THRESHOLD
+            and "excessive_internal_links" not in existing_types
+        ):
+            existing_types.add("excessive_internal_links")
+            seo_issues.append(
+                {
+                    "type": "excessive_internal_links",
+                    "severity": "warning",
+                    "message": (
+                        f"Page contains {outgoing_count} unique outgoing "
+                        f"internal links, exceeding the threshold of "
+                        f"{EXCESSIVE_INTERNAL_LINKS_THRESHOLD}; reduce link "
+                        f"clutter to focus crawl budget and link equity."
+                    ),
+                    "url": page_url,
+                    "outgoing_internal_links": outgoing_count,
+                    "incoming_internal_links": incoming_count,
+                    "depth": page_depth,
+                }
+            )
+
+        # 7. isolated_section: page belongs to a weakly connected / isolated internal section
+        if (
+            page_url in isolated_sections
+            and "isolated_section" not in existing_types
+        ):
+            existing_types.add("isolated_section")
+            comp_urls, outside_incoming = isolated_sections[page_url]
+            seo_issues.append(
+                {
+                    "type": "isolated_section",
+                    "severity": "warning",
+                    "message": (
+                        f"Page is part of an isolated internal section "
+                        f"({', '.join(comp_urls)}) with {outside_incoming} "
+                        f"incoming and 0 outgoing internal links to the rest "
+                        f"of the site; add reciprocal internal links to "
+                        f"integrate this section."
+                    ),
+                    "url": page_url,
+                    "isolated_pages": list(comp_urls),
+                    "incoming_internal_links": incoming_count,
+                    "outgoing_internal_links": outgoing_count,
+                    "depth": page_depth,
+                }
+            )
+
+
 def crawl_website(
     start_url: str,
     max_pages: int = 10,
@@ -2107,6 +2616,7 @@ def crawl_website(
     initial_link_hops: dict[str, tuple[int | None, str | None, str | None]] = {}
     checked_redirects: dict[str, dict[str, Any] | None] = {}
     page_contents: dict[str, tuple[str | None, int]] = {}
+    page_link_data: dict[str, dict[str, Any]] = {}
     crawl_start_time = time.perf_counter()
 
     parsed_start_url = urlparse(clean_start_url)
@@ -2230,6 +2740,8 @@ def crawl_website(
                     "meta_description": meta_description,
                     "h1": h1_heading,
                     "total_links": total_links,
+                    "incoming_internal_links": 0,
+                    "outgoing_internal_links": 0,
                     "content_type": content_type,
                     "response_time_ms": response_time_ms,
                     "page_size_bytes": page_size_bytes,
@@ -2250,6 +2762,7 @@ def crawl_website(
 
             anchor_tags = soup.find_all("a")
             discovered_urls = set()
+            target_host_fold = (target_hostname or "").casefold()
 
             for tag in anchor_tags:
                 href = tag.get("href")
@@ -2263,13 +2776,27 @@ def crawl_website(
                 if parsed_url.scheme not in ("http", "https"):
                     continue
 
-                if parsed_url.hostname != target_hostname:
+                if (parsed_url.hostname or "").casefold() != target_host_fold:
                     continue
 
                 discovered_urls.add(clean_url)
 
+            sitemap_urls = set()
+            for loc_tag in soup.find_all("loc"):
+                loc_text = loc_tag.get_text(strip=True)
+                if not loc_text:
+                    continue
+                abs_loc = urljoin(current_url, loc_text)
+                clean_loc, _ = urldefrag(abs_loc)
+                parsed_loc = urlparse(clean_loc)
+                if (
+                    parsed_loc.scheme in ("http", "https")
+                    and (parsed_loc.hostname or "").casefold() == target_host_fold
+                ):
+                    sitemap_urls.add(clean_loc)
+
             if current_depth < max_depth:
-                for next_url in discovered_urls:
+                for next_url in discovered_urls | sitemap_urls:
                     if next_url not in visited and next_url not in queued_urls:
                         queued_urls.add(next_url)
                         queue.append((next_url, current_depth + 1))
@@ -2403,6 +2930,12 @@ def crawl_website(
                 )
             )
             if is_html_content(content_type):
+                page_link_data[current_url] = _extract_page_internal_link_data(
+                    page_url=current_url,
+                    soup=soup,
+                    target_hostname=target_hostname,
+                    response_headers=response.headers,
+                )
                 visible_text = extract_visible_text(soup)
                 normalized_content = normalize_visible_content(visible_text)
                 word_count = len(extract_meaningful_words(visible_text))
@@ -2441,6 +2974,8 @@ def crawl_website(
                     "meta_description": None,
                     "h1": None,
                     "total_links": 0,
+                    "incoming_internal_links": 0,
+                    "outgoing_internal_links": 0,
                     "content_type": None,
                     "response_time_ms": None,
                     "page_size_bytes": None,
@@ -2463,6 +2998,8 @@ def crawl_website(
                     "meta_description": None,
                     "h1": None,
                     "total_links": 0,
+                    "incoming_internal_links": 0,
+                    "outgoing_internal_links": 0,
                     "content_type": error.response.headers.get("content-type"),
                     "response_time_ms": response_time_ms,
                     "page_size_bytes": page_size_bytes,
@@ -2478,6 +3015,9 @@ def crawl_website(
 
     detect_duplicate_seo_issues(results)
     detect_duplicate_content_issues(results, page_contents)
+    detect_internal_link_structure_issues(
+        results, clean_start_url, page_link_data
+    )
     measured_crawl_duration = max(0.0, time.perf_counter() - crawl_start_time)
     summed_page_seconds = sum(
         (page.get("response_time_ms") or 0.0) / 1000.0 for page in results

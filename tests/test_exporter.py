@@ -15,6 +15,8 @@ SAMPLE_PAGES = [
         "meta_description": "Line one\nLine two",
         "h1": "Welcome",
         "total_links": 12,
+        "incoming_internal_links": 2,
+        "outgoing_internal_links": 8,
         "content_type": "text/html; charset=utf-8",
         "response_time_ms": 140.25,
         "page_size_bytes": 4096,
@@ -29,6 +31,8 @@ SAMPLE_PAGES = [
         "meta_description": None,
         "h1": None,
         "total_links": 0,
+        "incoming_internal_links": 0,
+        "outgoing_internal_links": 0,
         "content_type": "text/html",
         "response_time_ms": 85.0,
         "page_size_bytes": 512,
@@ -43,6 +47,8 @@ SAMPLE_PAGES = [
         "meta_description": None,
         "h1": None,
         "total_links": 3,
+        "incoming_internal_links": 1,
+        "outgoing_internal_links": 2,
         "content_type": "text/html",
         "response_time_ms": 2450.5,
         "page_size_bytes": 1572864,
@@ -147,6 +153,15 @@ SAMPLE_PAGES = [
                 "severity": "warning",
                 "message": "The root <html> element is missing a valid lang attribute (e.g., <html lang=\"en\">) to declare the page language for screen readers",
                 "url": "https://example.com/café",
+            },
+            {
+                "type": "low_internal_link_count",
+                "severity": "warning",
+                "message": "Page has only 1 incoming internal link(s) from other crawled pages (recommended minimum is 3); add contextual internal links to improve crawlability.",
+                "url": "https://example.com/café",
+                "incoming_internal_links": 1,
+                "outgoing_internal_links": 2,
+                "depth": 1,
             },
         ],
         "error": None,
@@ -271,7 +286,7 @@ class PageExportTests(ExporterTestCase):
         self.assertIn("seo_issues", rows[0])
         self.assertEqual(json.loads(rows[0]["seo_issues"]), [])
         parsed_issues = json.loads(rows[2]["seo_issues"])
-        self.assertEqual(len(parsed_issues), 13)
+        self.assertEqual(len(parsed_issues), 14)
         self.assertEqual(parsed_issues[0]["type"], "missing_meta_description")
         self.assertEqual(parsed_issues[2]["type"], "duplicate_title")
         self.assertEqual(parsed_issues[3]["type"], "missing_image_alt")
@@ -314,6 +329,10 @@ class PageExportTests(ExporterTestCase):
         self.assertEqual(parsed_issues[11]["page_size_bytes"], 1572864)
         self.assertEqual(parsed_issues[12]["type"], "missing_lang")
         self.assertEqual(parsed_issues[12]["severity"], "warning")
+        self.assertEqual(parsed_issues[13]["type"], "low_internal_link_count")
+        self.assertEqual(parsed_issues[13]["incoming_internal_links"], 1)
+        self.assertEqual(parsed_issues[13]["outgoing_internal_links"], 2)
+        self.assertEqual(parsed_issues[13]["depth"], 1)
 
         json_data = read_json(json_path)
         self.assertEqual(json_data[2]["seo_issues"], SAMPLE_PAGES[2]["seo_issues"])

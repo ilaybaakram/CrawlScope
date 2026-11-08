@@ -2348,6 +2348,355 @@ class AccessibilitySeoAuditTests(unittest.TestCase):
         self.assertEqual(non_html_page["seo_issues"], [])
 
 
+class InternalLinkStructureAuditTests(unittest.TestCase):
+    def make_valid_page_html(
+        self,
+        url: str,
+        label: str,
+        links_html: str = "",
+        extra_head_html: str = "",
+    ) -> str:
+        words = " ".join(f"{label}word{i}" for i in range(520))
+        return (
+            f'<html lang="en"><head><title>Title {label}</title>'
+            f'<meta name="description" content="Description for {label}">'
+            f'<link rel="canonical" href="{url}">'
+            '<script type="application/ld+json">'
+            '{"@context":"https://schema.org","@type":"WebPage"}'
+            "</script>"
+            f"{extra_head_html}</head>"
+            f"<body><main><h1>Heading {label}</h1><p>{words}</p>{links_html}</main></body></html>"
+        )
+
+    def crawl_site_map(
+        self,
+        page_map: dict[str, str],
+        max_pages: int = 10,
+        max_depth: int = 5,
+    ) -> list[dict]:
+        def fake_get(url, **_):
+            if url.endswith("/robots.txt"):
+                return make_response("GET", url, 200, ROBOTS_TXT)
+            if url in page_map:
+                return make_response("GET", url, 200, page_map[url])
+            return make_response("GET", url, 404, "")
+
+        def fake_head(url, **_):
+            if url in page_map:
+                return make_response("HEAD", url, 200)
+            return make_response("HEAD", url, 200)
+
+        with patch("crawler.httpx.get", side_effect=fake_get), \
+             patch("crawler.httpx.head", side_effect=fake_head), \
+             patch("crawler.time.sleep"):
+            return crawler.crawl_website(
+                START_URL,
+                max_pages=max_pages,
+                max_depth=max_depth,
+            )
+
+    def test_orphan_page_detected_excluding_start_url_and_self_links_ignored(self):
+        orphan_url = "https://example.com/orphan-page"
+        linked_url = "https://example.com/linked-page"
+        page_map = {
+            START_URL: self.make_valid_page_html(
+                START_URL,
+                "home",
+                links_html=(
+                    f'<a href="{linked_url}">Linked Page</a>'
+                    f"<loc>{orphan_url}</loc>"
+                ),
+            ),
+            linked_url: self.make_valid_page_html(
+                linked_url,
+                "linked",
+                links_html=f'<a href="{START_URL}">Back Home</a>',
+            ),
+            # Orphan page links only to itself (self-link) and back to home,
+            # with 0 incoming <a href> links from any other crawled page
+            orphan_url: self.make_valid_page_html(
+                orphan_url,
+                "orphan",
+                links_html=(
+                    f'<a href="{orphan_url}">Self Link</a>'
+                    f'<a href="{orphan_url}#section">Self Fragment</a>'
+                    f'<a href="{START_URL}">Home</a>'
+                ),
+            ),
+        }
+        pages = self.crawl_site_map(page_map, max_pages=5, max_depth=2)
+        by_url = {p["url"]: p for p in pages}
+
+        # Start URL should never be flagged as orphan_page
+        home_types = [i["type"] for i in by_url[START_URL]["seo_issues"]]
+        self.assertNotIn("orphan_page", home_types)
+
+        # Orphan page has 0 incoming links from other crawled pages (self-links excluded)
+        orphan_page = by_url[orphan_url]
+        self.assertEqual(orphan_page["incoming_internal_links"], 0)
+        self.assertEqual(orphan_page["outgoing_internal_links"], 1)
+        orphan_issues = [
+            i for i in orphan_page["seo_issues"] if i["type"] == "orphan_page"
+        ]
+        self.assertEqual(len(orphan_issues), 1)
+        self.assertEqual(orphan_issues[0]["severity"], "warning")
+        self.assertEqual(orphan_issues[0]["incoming_internal_links"], 0)
+        # Orphan page should not also report duplicate low_internal_link_count
+        self.assertNotIn(
+            "low_internal_link_count",
+            [i["type"] for i in orphan_page["seo_issues"]],
+        )
+
+    def test_incoming_link_counts_and_low_internal_link_count_threshold(self):
+        hub_url = "https://example.com/hub"
+        p1_url = "https://example.com/p1"
+        p2_url = "https://example.com/p2"
+        weak_url = "https://example.com/weak"
+
+        # hub receives 3 incoming links (from START_URL, p1, p2) -> no low_internal_link_count
+        # weak receives only 1 incoming link (from START_URL) -> flagged as low_internal_link_count
+        page_map = {
+            START_URL: self.make_valid_page_html(
+                START_URL,
+                "home",
+                links_html=(
+                    f'<a href="{hub_url}">Hub</a>'
+                    f'<a href="{p1_url}">P1</a>'
+                    f'<a href="{p2_url}">P2</a>'
+                    f'<a href="{weak_url}">Weak</a>'
+                ),
+            ),
+            hub_url: self.make_valid_page_html(
+                hub_url,
+                "hub",
+                links_html=(
+                    f'<a href="{START_URL}">Home</a>'
+                    f'<a href="{p1_url}">P1</a>'
+                    f'<a href="{p2_url}">P2</a>'
+                ),
+            ),
+            p1_url: self.make_valid_page_html(
+                p1_url,
+                "p1",
+                links_html=(
+                    f'<a href="{START_URL}">Home</a>'
+                    f'<a href="{hub_url}">Hub</a>'
+                    f'<a href="{p2_url}">P2</a>'
+                ),
+            ),
+            p2_url: self.make_valid_page_html(
+                p2_url,
+                "p2",
+                links_html=(
+                    f'<a href="{START_URL}">Home</a>'
+                    f'<a href="{hub_url}">Hub</a>'
+                    f'<a href="{p1_url}">P1</a>'
+                ),
+            ),
+            weak_url: self.make_valid_page_html(
+                weak_url,
+                "weak",
+                links_html=f'<a href="{START_URL}">Home</a>',
+            ),
+        }
+
+        pages = self.crawl_site_map(page_map, max_pages=5, max_depth=2)
+        by_url = {p["url"]: p for p in pages}
+
+        self.assertEqual(by_url[hub_url]["incoming_internal_links"], 3)
+        self.assertEqual(by_url[hub_url]["seo_issues"], [])
+
+        self.assertEqual(by_url[weak_url]["incoming_internal_links"], 1)
+        weak_issues = [
+            i
+            for i in by_url[weak_url]["seo_issues"]
+            if i["type"] == "low_internal_link_count"
+        ]
+        self.assertEqual(len(weak_issues), 1)
+        self.assertEqual(weak_issues[0]["severity"], "warning")
+        self.assertEqual(weak_issues[0]["incoming_internal_links"], 1)
+
+    def test_deep_page_threshold_over_4_levels(self):
+        urls = [START_URL] + [
+            f"https://example.com/level-{d}" for d in range(1, 6)
+        ]
+        page_map = {}
+        for idx, u in enumerate(urls):
+            next_link = (
+                f'<a href="{urls[idx + 1]}">Next Level</a>'
+                if idx + 1 < len(urls)
+                else f'<a href="{START_URL}">Back Home</a>'
+            )
+            page_map[u] = self.make_valid_page_html(
+                u, f"lvl{idx}", links_html=next_link
+            )
+
+        pages = self.crawl_site_map(page_map, max_pages=6, max_depth=5)
+        by_url = {p["url"]: p for p in pages}
+
+        # Depth 0..4 should not trigger deep_page
+        for d in range(1, 5):
+            u = f"https://example.com/level-{d}"
+            self.assertEqual(by_url[u]["depth"], d)
+            deep_issues = [
+                i for i in by_url[u]["seo_issues"] if i["type"] == "deep_page"
+            ]
+            self.assertEqual(deep_issues, [])
+
+        # Depth 5 (> 4) triggers deep_page
+        level_5 = by_url["https://example.com/level-5"]
+        self.assertEqual(level_5["depth"], 5)
+        deep_5 = [
+            i for i in level_5["seo_issues"] if i["type"] == "deep_page"
+        ]
+        self.assertEqual(len(deep_5), 1)
+        self.assertEqual(deep_5[0]["severity"], "warning")
+        self.assertEqual(deep_5[0]["depth"], 5)
+
+    def test_nofollow_internal_link_and_nofollow_page_without_duplication(self):
+        page_map = {
+            START_URL: self.make_valid_page_html(
+                START_URL,
+                "home",
+                links_html=(
+                    '<a href="/internal-a" rel="nofollow">Internal A</a>'
+                    '<a href="/internal-a#sec" rel="nofollow">Internal A Dup</a>'
+                    '<a href="/internal-b" rel="noopener nofollow">Internal B</a>'
+                    '<a href="https://external.org/out" rel="nofollow">External Nofollow</a>'
+                ),
+                extra_head_html='<meta name="robots" content="index, nofollow">',
+            )
+        }
+        pages = self.crawl_site_map(page_map, max_pages=1, max_depth=0)
+        page = pages[0]
+
+        nf_link_issues = [
+            i
+            for i in page["seo_issues"]
+            if i["type"] == "nofollow_internal_link"
+        ]
+        self.assertEqual(len(nf_link_issues), 1)
+        self.assertEqual(nf_link_issues[0]["severity"], "warning")
+        self.assertEqual(
+            nf_link_issues[0]["nofollow_links"],
+            [
+                "https://example.com/internal-a",
+                "https://example.com/internal-b",
+            ],
+        )
+
+        # nofollow_page is reported exactly once (no duplicate with detect_robots_seo_issues)
+        nf_page_issues = [
+            i for i in page["seo_issues"] if i["type"] == "nofollow_page"
+        ]
+        self.assertEqual(len(nf_page_issues), 1)
+
+    def test_excessive_internal_links_and_duplicate_anchor_and_external_exclusion(self):
+        # 100 unique internal links + 30 duplicate anchors + 50 external links -> 100 unique internal links (not flagged)
+        links_100 = "".join(
+            f'<a href="/item-{i}">Item {i}</a>' for i in range(1, 101)
+        )
+        dup_anchors = "".join(
+            f'<a href="/item-1#frag-{i}">Dup {i}</a>' for i in range(30)
+        )
+        external_anchors = "".join(
+            f'<a href="https://external.org/ext-{i}">Ext {i}</a>'
+            for i in range(50)
+        )
+        boundary_map = {
+            START_URL: self.make_valid_page_html(
+                START_URL,
+                "boundary",
+                links_html=links_100 + dup_anchors + external_anchors,
+            )
+        }
+        boundary_page = self.crawl_site_map(
+            boundary_map, max_pages=1, max_depth=0
+        )[0]
+        self.assertEqual(boundary_page["outgoing_internal_links"], 100)
+        self.assertEqual(boundary_page["seo_issues"], [])
+
+        # 101 unique internal links -> flagged as excessive_internal_links
+        links_101 = links_100 + '<a href="/item-101">Item 101</a>'
+        excessive_map = {
+            START_URL: self.make_valid_page_html(
+                START_URL,
+                "excessive",
+                links_html=links_101 + dup_anchors + external_anchors,
+            )
+        }
+        excessive_page = self.crawl_site_map(
+            excessive_map, max_pages=1, max_depth=0
+        )[0]
+        self.assertEqual(excessive_page["outgoing_internal_links"], 101)
+        excessive_issues = [
+            i
+            for i in excessive_page["seo_issues"]
+            if i["type"] == "excessive_internal_links"
+        ]
+        self.assertEqual(len(excessive_issues), 1)
+        self.assertEqual(excessive_issues[0]["severity"], "warning")
+        self.assertEqual(excessive_issues[0]["outgoing_internal_links"], 101)
+
+    def test_cycles_and_isolated_section_detection(self):
+        main_url = "https://example.com/main"
+        island_a = "https://example.com/island-a"
+        island_b = "https://example.com/island-b"
+
+        # START_URL <-> main_url are mutually connected;
+        # START_URL has a single one-way link into island_a, and island_a <-> island_b
+        # cycle between themselves with 0 outgoing links back to the main site.
+        page_map = {
+            START_URL: self.make_valid_page_html(
+                START_URL,
+                "home",
+                links_html=(
+                    f'<a href="{main_url}">Main</a>'
+                    f'<a href="{island_a}">Island A</a>'
+                ),
+            ),
+            main_url: self.make_valid_page_html(
+                main_url,
+                "main",
+                links_html=f'<a href="{START_URL}">Home</a>',
+            ),
+            island_a: self.make_valid_page_html(
+                island_a,
+                "islandA",
+                links_html=f'<a href="{island_b}">Island B</a>',
+            ),
+            island_b: self.make_valid_page_html(
+                island_b,
+                "islandB",
+                links_html=f'<a href="{island_a}">Island A</a>',
+            ),
+        }
+        pages = self.crawl_site_map(page_map, max_pages=5, max_depth=3)
+        by_url = {p["url"]: p for p in pages}
+
+        self.assertNotIn(
+            "isolated_section",
+            [i["type"] for i in by_url[START_URL]["seo_issues"]],
+        )
+        self.assertNotIn(
+            "isolated_section",
+            [i["type"] for i in by_url[main_url]["seo_issues"]],
+        )
+
+        for island_url in (island_a, island_b):
+            iso_issues = [
+                i
+                for i in by_url[island_url]["seo_issues"]
+                if i["type"] == "isolated_section"
+            ]
+            self.assertEqual(len(iso_issues), 1)
+            self.assertEqual(iso_issues[0]["severity"], "warning")
+            self.assertEqual(
+                iso_issues[0]["isolated_pages"],
+                [island_a, island_b],
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
 

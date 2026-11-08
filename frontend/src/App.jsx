@@ -12,6 +12,8 @@ const PAGE_FIELDS = [
   "meta_description",
   "h1",
   "total_links",
+  "incoming_internal_links",
+  "outgoing_internal_links",
   "content_type",
   "response_time_ms",
   "page_size_bytes",
@@ -400,6 +402,8 @@ function App() {
                   <th>H1</th>
                   <th>Meta Description</th>
                   <th>Links</th>
+                  <th>Incoming Internal</th>
+                  <th>Outgoing Internal</th>
                   <th>Response Time</th>
                   <th>Page Size</th>
                   <th>Content-Type</th>
@@ -433,6 +437,8 @@ function App() {
                     <td>{page.h1 || "—"}</td>
                     <td>{page.meta_description || "—"}</td>
                     <td>{page.total_links ?? 0}</td>
+                    <td>{page.incoming_internal_links ?? 0}</td>
+                    <td>{page.outgoing_internal_links ?? 0}</td>
                     <td>
                       {page.response_time_ms !== undefined &&
                       page.response_time_ms !== null
@@ -477,6 +483,9 @@ function App() {
                   <th>Page URL</th>
                   <th>Issue Type</th>
                   <th>Severity</th>
+                  <th>Depth</th>
+                  <th>Incoming Internal</th>
+                  <th>Outgoing Internal</th>
                   <th>Canonical URL</th>
                   <th>Robots Directive</th>
                   <th>Schema Types</th>
@@ -520,6 +529,23 @@ function App() {
                       >
                         {issue.severity}
                       </span>
+                    </td>
+                    <td>
+                      {issue.depth !== undefined && issue.depth !== null
+                        ? issue.depth
+                        : "—"}
+                    </td>
+                    <td>
+                      {issue.incoming_internal_links !== undefined &&
+                      issue.incoming_internal_links !== null
+                        ? issue.incoming_internal_links
+                        : "—"}
+                    </td>
+                    <td>
+                      {issue.outgoing_internal_links !== undefined &&
+                      issue.outgoing_internal_links !== null
+                        ? issue.outgoing_internal_links
+                        : "—"}
                     </td>
                     <td className="url-cell">
                       {issue.canonical_url ? (

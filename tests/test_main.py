@@ -13,6 +13,8 @@ SAMPLE_PAGE = {
     "meta_description": None,
     "h1": "Example Domain",
     "total_links": 1,
+    "incoming_internal_links": 0,
+    "outgoing_internal_links": 1,
     "content_type": "text/html",
     "response_time_ms": 2300.0,
     "page_size_bytes": 1572864,
@@ -107,6 +109,15 @@ SAMPLE_PAGE = {
             "message": "The root <html> element is missing a valid lang attribute (e.g., <html lang=\"en\">) to declare the page language for screen readers",
             "url": "https://example.com/",
         },
+        {
+            "type": "nofollow_internal_link",
+            "severity": "warning",
+            "message": "Page has 1 internal link(s) with rel=\"nofollow\" (https://example.com/about); remove nofollow on internal links so search engines can follow them and pass link equity.",
+            "url": "https://example.com/",
+            "nofollow_links": ["https://example.com/about"],
+            "outgoing_internal_links": 1,
+            "depth": 0,
+        },
     ],
     "error": None,
 }
@@ -187,6 +198,7 @@ class FastAPIEndpointTests(unittest.TestCase):
                 "thin_content",
                 "slow_response",
                 "missing_lang",
+                "nofollow_internal_link",
             ],
         )
         self.assertEqual(

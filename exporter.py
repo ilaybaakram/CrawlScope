@@ -12,6 +12,8 @@ PAGE_FIELDS = [
     "meta_description",
     "h1",
     "total_links",
+    "incoming_internal_links",
+    "outgoing_internal_links",
     "content_type",
     "response_time_ms",
     "page_size_bytes",
