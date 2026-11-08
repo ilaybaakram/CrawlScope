@@ -15,6 +15,8 @@ SAMPLE_PAGE = {
     "total_links": 1,
     "incoming_internal_links": 0,
     "outgoing_internal_links": 1,
+    "outgoing_external_links": 0,
+    "external_links": [],
     "is_https": True,
     "in_sitemap": True,
     "content_type": "text/html",
@@ -222,6 +224,22 @@ class FastAPIEndpointTests(unittest.TestCase):
                     "warning": 1,
                     "info": 0,
                 },
+            },
+        )
+        self.assertEqual(
+            data["external_link_summary"],
+            {
+                "unique_external_urls": 0,
+                "verified_count": 0,
+                "broken_count": 0,
+                "redirect_count": 0,
+                "verification_failures_count": 0,
+                "blocked_count": 0,
+                "unverified_count": 0,
+                "verification_enabled": True,
+                "verification_disabled": False,
+                "limit_reached": False,
+                "max_external_checks": 50,
             },
         )
         self.assertEqual(data["pages"], [SAMPLE_PAGE])

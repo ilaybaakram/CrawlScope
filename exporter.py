@@ -14,6 +14,7 @@ PAGE_FIELDS = [
     "total_links",
     "incoming_internal_links",
     "outgoing_internal_links",
+    "outgoing_external_links",
     "content_type",
     "response_time_ms",
     "page_size_bytes",

@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from crawler import (
     crawl_website,
+    summarize_external_links,
     summarize_security_audit,
     summarize_sitemap_coverage,
 )
@@ -75,6 +76,7 @@ def run_crawl(request: CrawlRequest) -> dict[str, Any]:
         "links_checked": len(links),
         "sitemap_coverage": summarize_sitemap_coverage(pages),
         "security_summary": summarize_security_audit(pages),
+        "external_link_summary": summarize_external_links(pages),
         "pages": pages,
         "links": links,
     }

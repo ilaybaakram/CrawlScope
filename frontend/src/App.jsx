@@ -14,6 +14,7 @@ const PAGE_FIELDS = [
   "total_links",
   "incoming_internal_links",
   "outgoing_internal_links",
+  "outgoing_external_links",
   "content_type",
   "response_time_ms",
   "page_size_bytes",
@@ -36,6 +37,18 @@ const SECURITY_ISSUE_TYPES = new Set([
   "missing_permissions_policy",
   "insecure_external_resource",
   "sensitive_form_over_http",
+]);
+
+const EXTERNAL_LINK_ISSUE_TYPES = new Set([
+  "broken_external_link",
+  "external_redirect",
+  "external_link_timeout",
+  "external_link_ssl_error",
+  "external_link_target_blank_noopener",
+  "external_link_target_blank_noreferrer",
+  "external_link_to_http",
+  "nofollow_external_link",
+  "excessive_external_links",
 ]);
 
 const LINK_FIELDS = ["url", "found_on", "status_code", "result", "error"];
@@ -251,6 +264,19 @@ function App() {
         (i) => SECURITY_ISSUE_TYPES.has(i.type) && i.severity === "info"
       ).length,
     },
+  };
+  const externalLinkSummary = crawlData?.external_link_summary || {
+    unique_external_urls: 0,
+    verified_count: 0,
+    broken_count: 0,
+    redirect_count: 0,
+    verification_failures_count: 0,
+    blocked_count: 0,
+    unverified_count: 0,
+    verification_enabled: true,
+    verification_disabled: false,
+    limit_reached: false,
+    max_external_checks: 50,
   };
   const canDownload = Boolean(crawlData) && !isLoading;
 
@@ -478,6 +504,58 @@ function App() {
 
       <section className="card">
         <div className="section-header">
+          <h2>External Link &amp; Safety Summary</h2>
+          <div className="seo-metrics">
+            <span className="metric-badge">
+              Unique External URLs:{" "}
+              <strong>
+                {crawlData ? externalLinkSummary.unique_external_urls : 0}
+              </strong>
+            </span>
+            <span className="metric-badge">
+              Verified:{" "}
+              <strong>
+                {crawlData ? externalLinkSummary.verified_count : 0}
+              </strong>
+            </span>
+            <span className="metric-badge">
+              Broken External:{" "}
+              <strong>
+                {crawlData ? externalLinkSummary.broken_count : 0}
+              </strong>
+            </span>
+            <span className="metric-badge">
+              Redirects:{" "}
+              <strong>
+                {crawlData ? externalLinkSummary.redirect_count : 0}
+              </strong>
+            </span>
+            <span className="metric-badge">
+              Failures / Timeouts / SSL:{" "}
+              <strong>
+                {crawlData ? externalLinkSummary.verification_failures_count : 0}
+              </strong>
+            </span>
+            <span className="metric-badge">
+              Blocked (SSRF):{" "}
+              <strong>
+                {crawlData ? externalLinkSummary.blocked_count : 0}
+              </strong>
+            </span>
+            <span className="metric-badge">
+              Unverified:{" "}
+              <strong>
+                {crawlData ? externalLinkSummary.unverified_count : 0}
+              </strong>
+              {crawlData?.external_link_summary?.limit_reached && " (Limit Reached)"}
+              {crawlData?.external_link_summary?.verification_disabled && " (Disabled)"}
+            </span>
+          </div>
+        </div>
+      </section>
+
+      <section className="card">
+        <div className="section-header">
           <h2>Download Crawl Results</h2>
           {!crawlData && (
             <span className="section-hint">
@@ -543,6 +621,7 @@ function App() {
                   <th>Links</th>
                   <th>Incoming Internal</th>
                   <th>Outgoing Internal</th>
+                  <th>Outgoing External</th>
                   <th>HTTPS</th>
                   <th>Security</th>
                   <th>In Sitemap</th>
@@ -581,6 +660,7 @@ function App() {
                     <td>{page.total_links ?? 0}</td>
                     <td>{page.incoming_internal_links ?? 0}</td>
                     <td>{page.outgoing_internal_links ?? 0}</td>
+                    <td>{page.outgoing_external_links ?? 0}</td>
                     <td>
                       <span
                         className={
@@ -680,6 +760,7 @@ function App() {
                   <th>Depth</th>
                   <th>Incoming Internal</th>
                   <th>Outgoing Internal</th>
+                  <th>External URLs</th>
                   <th>Missing Header</th>
                   <th>Insecure / Form URL</th>
                   <th>Sitemap URL</th>
@@ -743,6 +824,14 @@ function App() {
                       issue.outgoing_internal_links !== null
                         ? issue.outgoing_internal_links
                         : "—"}
+                    </td>
+                    <td className="url-cell">
+                      {Array.isArray(issue.external_urls) &&
+                      issue.external_urls.length > 0 ? (
+                        <code>{issue.external_urls.join(", ")}</code>
+                      ) : (
+                        "—"
+                      )}
                     </td>
                     <td>
                       {issue.missing_header ? (

@@ -1,7 +1,11 @@
+import ipaddress
 import json
+import socket
+import ssl
 import time
 import xml.etree.ElementTree as ET
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 from urllib.parse import urldefrag, urljoin, urlparse, urlunparse
@@ -4132,6 +4136,543 @@ def summarize_security_audit(
     }
 
 
+# ---------------------------------------------------------------------------
+# External Link & Link Safety Audit
+# ---------------------------------------------------------------------------
+
+# Set to False to skip all outbound HTTP verification (static checks still run).
+EXTERNAL_LINK_VERIFICATION_ENABLED = True
+# Maximum number of unique external URLs verified per crawl.
+MAX_EXTERNAL_LINK_CHECKS = 50
+# Timeout (seconds) for each external verification request.
+EXTERNAL_LINK_TIMEOUT_SECONDS = 5.0
+# Maximum number of external verification requests running at the same time.
+EXTERNAL_LINK_MAX_CONCURRENCY = 5
+# Maximum number of redirect hops followed for one external URL.
+MAX_EXTERNAL_REDIRECT_HOPS = 5
+# A page linking to more than this many unique external destinations is flagged.
+EXCESSIVE_EXTERNAL_LINKS_THRESHOLD = 50
+
+EXTERNAL_LINK_ISSUE_TYPES = {
+    "broken_external_link",
+    "external_redirect",
+    "external_link_timeout",
+    "external_link_ssl_error",
+    "external_link_target_blank_noopener",
+    "external_link_target_blank_noreferrer",
+    "external_link_to_http",
+    "nofollow_external_link",
+    "excessive_external_links",
+}
+
+_QUALIFYING_REL_VALUES = ("nofollow", "sponsored", "ugc")
+_REDIRECT_STATUS_CODES = (301, 302, 303, 307, 308)
+_BLOCKED_HOSTNAME_SUFFIXES = (".localhost", ".local", ".internal", ".lan", ".home.arpa")
+
+# Verification statuses: verified outcomes vs. verification failures vs. unverified.
+VERIFIED_EXTERNAL_STATUSES = {"working", "broken", "redirect"}
+FAILED_EXTERNAL_STATUSES = {"timeout", "ssl_error", "error"}
+UNVERIFIED_EXTERNAL_STATUSES = {"blocked", "unverified_limit", "unverified_disabled"}
+
+
+def _normalize_external_url(url: str) -> str:
+    """Normalize an external URL so trivial variants (case, fragment, empty path) dedupe."""
+    return _normalize_internal_url(url)
+
+
+def _extract_external_links(
+    page_url: str,
+    soup: BeautifulSoup,
+    target_hostname: str | None,
+) -> list[dict[str, Any]]:
+    """Return one entry per unique external <a href> destination found on a page."""
+    target_host_fold = (target_hostname or "").casefold()
+    links: list[dict[str, Any]] = []
+    by_norm: dict[str, dict[str, Any]] = {}
+
+    for a_tag in soup.find_all("a"):
+        raw_href = a_tag.get("href")
+        if not isinstance(raw_href, str) or not raw_href.strip():
+            continue
+        abs_url, _ = urldefrag(urljoin(page_url, raw_href.strip()))
+        try:
+            parsed = urlparse(abs_url)
+            hostname = parsed.hostname
+        except ValueError:
+            continue
+        if parsed.scheme.lower() not in ("http", "https") or not hostname:
+            continue
+        if hostname.casefold() == target_host_fold:
+            continue
+
+        norm_url = _normalize_external_url(abs_url)
+        rel_tokens = _extract_rel_tokens(a_tag)
+        target_value = str(a_tag.get("target") or "").strip().lower()
+
+        entry = by_norm.get(norm_url)
+        if entry is None:
+            entry = {
+                "url": abs_url,
+                "normalized_url": norm_url,
+                "scheme": parsed.scheme.lower(),
+                "target_blank_without_noopener": False,
+                "target_blank_without_noreferrer": False,
+                "qualifying_rel": set(),
+            }
+            by_norm[norm_url] = entry
+            links.append(entry)
+
+        # noreferrer implies noopener in modern browsers.
+        if target_value == "_blank":
+            if "noopener" not in rel_tokens and "noreferrer" not in rel_tokens:
+                entry["target_blank_without_noopener"] = True
+            elif "noreferrer" not in rel_tokens:
+                entry["target_blank_without_noreferrer"] = True
+        for rel_value in _QUALIFYING_REL_VALUES:
+            if rel_value in rel_tokens:
+                entry["qualifying_rel"].add(rel_value)
+
+    return links
+
+
+def detect_external_link_seo_issues(
+    url: str,
+    external_links: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Run static (no-network) external link checks for one page."""
+    issues: list[dict[str, Any]] = []
+
+    noopener_urls = [e["url"] for e in external_links if e["target_blank_without_noopener"]]
+    noreferrer_urls = [e["url"] for e in external_links if e["target_blank_without_noreferrer"]]
+    http_urls = [e["url"] for e in external_links if e["scheme"] == "http"]
+    rel_links = [e for e in external_links if e["qualifying_rel"]]
+
+    if noopener_urls:
+        issues.append(
+            {
+                "type": "external_link_target_blank_noopener",
+                "severity": "warning",
+                "message": (
+                    f'{len(noopener_urls)} external link(s) open in a new tab with target="_blank" '
+                    f'but without rel="noopener" ({", ".join(noopener_urls[:5])}); add '
+                    f'rel="noopener noreferrer" so the opened page cannot control this window.'
+                ),
+                "url": url,
+                "external_urls": noopener_urls,
+            }
+        )
+    if noreferrer_urls:
+        issues.append(
+            {
+                "type": "external_link_target_blank_noreferrer",
+                "severity": "info",
+                "message": (
+                    f'{len(noreferrer_urls)} external link(s) use target="_blank" with '
+                    f'rel="noopener" but without rel="noreferrer" ({", ".join(noreferrer_urls[:5])}); '
+                    f'consider adding "noreferrer" if you do not want to share referrer data.'
+                ),
+                "url": url,
+                "external_urls": noreferrer_urls,
+            }
+        )
+    if http_urls:
+        issues.append(
+            {
+                "type": "external_link_to_http",
+                "severity": "warning",
+                "message": (
+                    f"{len(http_urls)} outbound link(s) point to insecure HTTP URLs "
+                    f"({', '.join(http_urls[:5])}); link to the HTTPS version when available."
+                ),
+                "url": url,
+                "external_urls": http_urls,
+            }
+        )
+    if rel_links:
+        rel_values = sorted({value for e in rel_links for value in e["qualifying_rel"]})
+        rel_urls = [e["url"] for e in rel_links]
+        issues.append(
+            {
+                "type": "nofollow_external_link",
+                "severity": "info",
+                "message": (
+                    f"{len(rel_urls)} external link(s) are qualified with rel="
+                    f"{'/'.join(rel_values)} ({', '.join(rel_urls[:5])}); this is fine for "
+                    f"paid or user-generated links, but review that editorial links are not "
+                    f"qualified unintentionally."
+                ),
+                "url": url,
+                "external_urls": rel_urls,
+                "rel_values": rel_values,
+            }
+        )
+    if len(external_links) > EXCESSIVE_EXTERNAL_LINKS_THRESHOLD:
+        issues.append(
+            {
+                "type": "excessive_external_links",
+                "severity": "warning",
+                "message": (
+                    f"Page links to {len(external_links)} unique external destinations, "
+                    f"exceeding the threshold of {EXCESSIVE_EXTERNAL_LINKS_THRESHOLD}; review "
+                    f"outbound links and remove ones that do not help visitors."
+                ),
+                "url": url,
+                "outgoing_external_links": len(external_links),
+            }
+        )
+    return issues
+
+
+def _resolve_hostname_ips(hostname: str) -> list[str]:
+    """Resolve a hostname to IP address strings. Returns [] if resolution fails."""
+    try:
+        infos = socket.getaddrinfo(hostname, None)
+    except (socket.gaierror, UnicodeError, OSError):
+        return []
+    ips: list[str] = []
+    for info in infos:
+        ip_text = str(info[4][0]).split("%", 1)[0]
+        if ip_text not in ips:
+            ips.append(ip_text)
+    return ips
+
+
+def _is_public_ip(ip_text: str) -> bool:
+    try:
+        ip_obj = ipaddress.ip_address(ip_text)
+    except ValueError:
+        return False
+    if isinstance(ip_obj, ipaddress.IPv6Address) and ip_obj.ipv4_mapped is not None:
+        ip_obj = ip_obj.ipv4_mapped
+    return ip_obj.is_global and not ip_obj.is_multicast
+
+
+def _check_external_target_safety(url: str) -> tuple[bool, str | None]:
+    """SSRF guard: allow only http(s) URLs whose host resolves exclusively to public IPs.
+
+    Returns (is_safe, reason). A reason starting with "dns:" means the host could
+    not be resolved (a verification failure rather than an unsafe target).
+    """
+    try:
+        parsed = urlparse(url)
+        hostname = parsed.hostname
+    except ValueError:
+        return False, "invalid URL"
+    if parsed.scheme.lower() not in ("http", "https") or not hostname:
+        return False, "unsupported URL scheme"
+
+    host_fold = hostname.casefold().rstrip(".")
+    if host_fold == "localhost" or host_fold.endswith(_BLOCKED_HOSTNAME_SUFFIXES):
+        return False, f"blocked internal hostname '{hostname}'"
+
+    try:
+        ipaddress.ip_address(host_fold)
+        is_ip_literal = True
+    except ValueError:
+        is_ip_literal = False
+
+    if is_ip_literal:
+        if not _is_public_ip(host_fold):
+            return False, f"blocked non-public IP address {hostname}"
+        return True, None
+
+    resolved_ips = _resolve_hostname_ips(hostname)
+    if not resolved_ips:
+        return False, f"dns: could not resolve hostname '{hostname}'"
+    for ip_text in resolved_ips:
+        if not _is_public_ip(ip_text):
+            return False, f"blocked: '{hostname}' resolves to non-public IP {ip_text}"
+    return True, None
+
+
+def _send_external_request(
+    url: str,
+    headers: dict[str, str],
+    timeout: float,
+) -> tuple[int, str | None]:
+    """Send one HEAD request (falling back to a streamed GET) without following redirects."""
+    response = httpx.head(url, headers=headers, timeout=timeout, follow_redirects=False)
+    if response.status_code in (405, 501):
+        with httpx.stream(
+            "GET", url, headers=headers, timeout=timeout, follow_redirects=False
+        ) as get_response:
+            return get_response.status_code, get_response.headers.get("location")
+    return response.status_code, response.headers.get("location")
+
+
+def _is_ssl_error(error: BaseException) -> bool:
+    current: BaseException | None = error
+    for _ in range(6):
+        if current is None:
+            break
+        if isinstance(current, ssl.SSLError):
+            return True
+        current = current.__cause__ or current.__context__
+    text = str(error).lower()
+    return any(marker in text for marker in ("certificate", "ssl", "tls handshake"))
+
+
+def check_external_url(
+    url: str,
+    headers: dict[str, str],
+    timeout: float = EXTERNAL_LINK_TIMEOUT_SECONDS,
+    max_redirect_hops: int = MAX_EXTERNAL_REDIRECT_HOPS,
+) -> dict[str, Any]:
+    """Verify one external URL safely and return its verification result (no retries)."""
+    result: dict[str, Any] = {
+        "url": url,
+        "verification_status": "error",
+        "status_code": None,
+        "redirect_status_code": None,
+        "destination_url": None,
+        "redirect_chain": [url],
+        "error": None,
+    }
+    current_url = url
+
+    for hop in range(max_redirect_hops + 1):
+        is_safe, reason = _check_external_target_safety(current_url)
+        if not is_safe:
+            if hop == 0:
+                is_dns_failure = bool(reason and reason.startswith("dns:"))
+                result["verification_status"] = "error" if is_dns_failure else "blocked"
+                result["error"] = reason
+            else:
+                # The redirect itself was observed; its unsafe target is not requested.
+                result["verification_status"] = "redirect"
+                result["destination_url"] = current_url
+                result["error"] = f"redirect target not verified ({reason})"
+            return result
+
+        try:
+            status_code, location = _send_external_request(current_url, headers, timeout)
+        except httpx.TimeoutException as error:
+            result["verification_status"] = "timeout"
+            result["error"] = str(error) or "request timed out"
+            return result
+        except httpx.RequestError as error:
+            result["verification_status"] = "ssl_error" if _is_ssl_error(error) else "error"
+            result["error"] = str(error) or error.__class__.__name__
+            return result
+
+        if status_code in _REDIRECT_STATUS_CODES and location:
+            if result["redirect_status_code"] is None:
+                result["redirect_status_code"] = status_code
+            next_url, _ = urldefrag(urljoin(current_url, location))
+            if next_url in result["redirect_chain"]:
+                result["verification_status"] = "redirect"
+                result["status_code"] = status_code
+                result["destination_url"] = next_url
+                result["error"] = "redirect loop detected"
+                return result
+            result["redirect_chain"].append(next_url)
+            current_url = next_url
+            continue
+
+        result["status_code"] = status_code
+        if status_code >= 400:
+            result["verification_status"] = "broken"
+        elif hop > 0:
+            result["verification_status"] = "redirect"
+        else:
+            result["verification_status"] = "working"
+        if hop > 0:
+            result["destination_url"] = current_url
+        return result
+
+    result["verification_status"] = "redirect"
+    result["destination_url"] = current_url
+    result["error"] = f"stopped after {max_redirect_hops} redirect hops"
+    return result
+
+
+def verify_external_links(
+    urls: list[str],
+    headers: dict[str, str],
+    enabled: bool = True,
+    max_checks: int = MAX_EXTERNAL_LINK_CHECKS,
+    timeout: float = EXTERNAL_LINK_TIMEOUT_SECONDS,
+    max_concurrency: int = EXTERNAL_LINK_MAX_CONCURRENCY,
+) -> dict[str, dict[str, Any]]:
+    """Verify unique external URLs with a request cap and a concurrency limit.
+
+    Returns a mapping of normalized URL -> verification result. URLs beyond the
+    cap (or all URLs when disabled) are recorded as unverified, never as failures.
+    """
+    unique_urls: list[str] = []
+    seen_norms: set[str] = set()
+    for raw_url in urls:
+        norm_url = _normalize_external_url(raw_url)
+        if norm_url not in seen_norms:
+            seen_norms.add(norm_url)
+            unique_urls.append(raw_url)
+
+    results: dict[str, dict[str, Any]] = {}
+    limit = max(0, int(max_checks)) if enabled else 0
+    to_check = unique_urls[:limit]
+
+    for raw_url in unique_urls[limit:]:
+        results[_normalize_external_url(raw_url)] = {
+            "url": raw_url,
+            "verification_status": "unverified_limit" if enabled else "unverified_disabled",
+            "status_code": None,
+            "redirect_status_code": None,
+            "destination_url": None,
+            "redirect_chain": [raw_url],
+            "error": (
+                f"not verified: limit of {limit} external checks reached"
+                if enabled
+                else "not verified: external link verification is disabled"
+            ),
+        }
+
+    if to_check:
+        workers = max(1, min(int(max_concurrency), len(to_check)))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            checked = executor.map(
+                lambda u: check_external_url(u, headers, timeout=timeout),
+                to_check,
+            )
+            for raw_url, check_result in zip(to_check, checked):
+                results[_normalize_external_url(raw_url)] = check_result
+
+    return results
+
+
+def apply_external_link_verification(
+    results: list[dict[str, Any]],
+    page_external_links: dict[str, list[dict[str, Any]]],
+    verification_results: dict[str, dict[str, Any]],
+) -> None:
+    """Attach per-page external link results and verification-based findings."""
+    rule_for_status = {
+        "broken": "broken_external_link",
+        "redirect": "external_redirect",
+        "timeout": "external_link_timeout",
+        "ssl_error": "external_link_ssl_error",
+    }
+
+    for page in results:
+        links = page_external_links.get(page["url"])
+        if not links:
+            continue
+
+        page_checks: list[dict[str, Any]] = []
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for link in links:
+            check = verification_results.get(link["normalized_url"])
+            if check is None:
+                continue
+            page_checks.append(
+                {
+                    "url": link["url"],
+                    "verification_status": check["verification_status"],
+                    "status_code": check["status_code"],
+                    "redirect_status_code": check["redirect_status_code"],
+                    "destination_url": check["destination_url"],
+                    "error": check["error"],
+                }
+            )
+            rule = rule_for_status.get(check["verification_status"])
+            if rule is not None:
+                grouped.setdefault(rule, []).append({**check, "url": link["url"]})
+        page["external_links"] = page_checks
+
+        seo_issues = page.setdefault("seo_issues", [])
+        existing_types = {issue.get("type") for issue in seo_issues}
+        for rule in (
+            "broken_external_link",
+            "external_redirect",
+            "external_link_timeout",
+            "external_link_ssl_error",
+        ):
+            checks = grouped.get(rule)
+            if not checks or rule in existing_types:
+                continue
+            first = checks[0]
+            urls = [c["url"] for c in checks]
+            preview = ", ".join(urls[:5])
+            if rule == "broken_external_link":
+                details = ", ".join(f"{c['url']} (HTTP {c['status_code']})" for c in checks[:5])
+                message = (
+                    f"{len(checks)} external link(s) return an HTTP error ({details}); "
+                    f"update or remove links to unavailable pages."
+                )
+                severity = "warning"
+            elif rule == "external_redirect":
+                details = ", ".join(
+                    f"{c['url']} -> {c['destination_url']} (HTTP {c['redirect_status_code']})"
+                    for c in checks[:5]
+                )
+                message = (
+                    f"{len(checks)} external link(s) redirect ({details}); link directly "
+                    f"to the final destination URL."
+                )
+                severity = "info"
+            elif rule == "external_link_timeout":
+                message = (
+                    f"{len(checks)} external link(s) timed out during verification ({preview}); "
+                    f"check whether the destination is reliable or still available."
+                )
+                severity = "warning"
+            else:
+                message = (
+                    f"{len(checks)} external link(s) failed TLS/SSL certificate validation "
+                    f"({preview}); link to a destination with a valid certificate."
+                )
+                severity = "warning"
+
+            issue: dict[str, Any] = {
+                "type": rule,
+                "severity": severity,
+                "message": message,
+                "url": page["url"],
+                "external_urls": urls,
+            }
+            if rule in ("broken_external_link", "external_redirect"):
+                issue["status_code"] = (
+                    first["redirect_status_code"]
+                    if rule == "external_redirect"
+                    else first["status_code"]
+                )
+            if rule == "external_redirect":
+                issue["source_url"] = first["url"]
+                issue["destination_url"] = first["destination_url"]
+                issue["redirect_chain"] = list(first["redirect_chain"])
+            seo_issues.append(issue)
+            existing_types.add(rule)
+
+
+def summarize_external_links(
+    results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Calculate External Link Summary statistics from crawled page results."""
+    status_by_norm: dict[str, str] = {}
+    for page in results:
+        for link in page.get("external_links") or []:
+            norm_url = _normalize_external_url(link.get("url", ""))
+            status_by_norm.setdefault(norm_url, link.get("verification_status") or "")
+
+    statuses = list(status_by_norm.values())
+    unverified_disabled = statuses.count("unverified_disabled")
+    unverified_limit = statuses.count("unverified_limit")
+    return {
+        "unique_external_urls": len(statuses),
+        "verified_count": sum(1 for s in statuses if s in VERIFIED_EXTERNAL_STATUSES),
+        "broken_count": statuses.count("broken"),
+        "redirect_count": statuses.count("redirect"),
+        "verification_failures_count": sum(
+            1 for s in statuses if s in FAILED_EXTERNAL_STATUSES
+        ),
+        "blocked_count": statuses.count("blocked"),
+        "unverified_count": unverified_disabled + unverified_limit,
+        "verification_enabled": EXTERNAL_LINK_VERIFICATION_ENABLED,
+        "verification_disabled": unverified_disabled > 0,
+        "limit_reached": unverified_limit > 0,
+        "max_external_checks": MAX_EXTERNAL_LINK_CHECKS,
+    }
+
+
 def crawl_website(
     start_url: str,
     max_pages: int = 10,
@@ -4158,6 +4699,7 @@ def crawl_website(
     checked_redirects: dict[str, dict[str, Any] | None] = {}
     page_contents: dict[str, tuple[str | None, int]] = {}
     page_link_data: dict[str, dict[str, Any]] = {}
+    page_external_links: dict[str, list[dict[str, Any]]] = {}
     crawl_start_time = time.perf_counter()
 
     parsed_start_url = urlparse(clean_start_url)
@@ -4283,6 +4825,8 @@ def crawl_website(
                     "total_links": total_links,
                     "incoming_internal_links": 0,
                     "outgoing_internal_links": 0,
+                    "outgoing_external_links": 0,
+                    "external_links": [],
                     "content_type": content_type,
                     "response_time_ms": response_time_ms,
                     "page_size_bytes": page_size_bytes,
@@ -4473,6 +5017,15 @@ def crawl_website(
                 )
             )
             if is_html_content(content_type):
+                ext_links = _extract_external_links(
+                    current_url, soup, target_hostname
+                )
+                page_external_links[current_url] = ext_links
+                results[-1]["outgoing_external_links"] = len(ext_links)
+                results[-1]["external_links"] = ext_links
+                seo_issues.extend(
+                    detect_external_link_seo_issues(current_url, ext_links)
+                )
                 page_link_data[current_url] = _extract_page_internal_link_data(
                     page_url=current_url,
                     soup=soup,
@@ -4528,6 +5081,8 @@ def crawl_website(
                     "total_links": 0,
                     "incoming_internal_links": 0,
                     "outgoing_internal_links": 0,
+                    "outgoing_external_links": 0,
+                    "external_links": [],
                     "content_type": None,
                     "response_time_ms": None,
                     "page_size_bytes": None,
@@ -4554,6 +5109,8 @@ def crawl_website(
                     "total_links": 0,
                     "incoming_internal_links": 0,
                     "outgoing_internal_links": 0,
+                    "outgoing_external_links": 0,
+                    "external_links": [],
                     "content_type": error.response.headers.get("content-type"),
                     "response_time_ms": response_time_ms,
                     "page_size_bytes": page_size_bytes,
@@ -4593,6 +5150,24 @@ def crawl_website(
         initial_link_hops=initial_link_hops,
         link_results=link_results,
         user_agent=user_agent,
+    )
+    all_external_urls = [
+        link["url"]
+        for ext_list in page_external_links.values()
+        for link in ext_list
+    ]
+    verification_results = verify_external_links(
+        urls=all_external_urls,
+        headers=headers,
+        enabled=EXTERNAL_LINK_VERIFICATION_ENABLED,
+        max_checks=MAX_EXTERNAL_LINK_CHECKS,
+        timeout=EXTERNAL_LINK_TIMEOUT_SECONDS,
+        max_concurrency=EXTERNAL_LINK_MAX_CONCURRENCY,
+    )
+    apply_external_link_verification(
+        results=results,
+        page_external_links=page_external_links,
+        verification_results=verification_results,
     )
 
     successful_pages = sum(1 for item in results if item["error"] is None)

@@ -1,4 +1,5 @@
 import unittest
+from typing import Any
 from unittest.mock import patch
 
 import httpx
@@ -152,6 +153,7 @@ class CrawlLinkCheckTests(unittest.TestCase):
         with patch("crawler.httpx.get", side_effect=fake_get), \
              patch("crawler.httpx.head", side_effect=fake_head), \
              patch("crawler.httpx.stream", return_value=FakeStream(200)), \
+             patch.object(crawler, "EXTERNAL_LINK_VERIFICATION_ENABLED", False), \
              patch("crawler.time.sleep"):
             pages = crawler.crawl_website(
                 START_URL, link_results=link_results, **kwargs
@@ -371,6 +373,7 @@ class DuplicateSeoAuditTests(unittest.TestCase):
 
         with patch("crawler.httpx.get", side_effect=fake_get), \
              patch("crawler.httpx.head", side_effect=fake_head), \
+             patch.object(crawler, "EXTERNAL_LINK_VERIFICATION_ENABLED", False), \
              patch("crawler.time.sleep"):
             return crawler.crawl_website(
                 START_URL,
@@ -965,6 +968,7 @@ class RedirectAuditTests(unittest.TestCase):
 
         with patch("crawler.httpx.get", side_effect=fake_get), \
              patch("crawler.httpx.head", side_effect=fake_head), \
+             patch.object(crawler, "EXTERNAL_LINK_VERIFICATION_ENABLED", False), \
              patch("crawler.time.sleep"):
             pages = crawler.crawl_website(
                 START_URL,
@@ -1115,6 +1119,7 @@ class RedirectAuditTests(unittest.TestCase):
 
         with patch("crawler.httpx.get", side_effect=fake_get), \
              patch("crawler.httpx.head", side_effect=fake_head), \
+             patch.object(crawler, "EXTERNAL_LINK_VERIFICATION_ENABLED", False), \
              patch("crawler.time.sleep"):
             pages = crawler.crawl_website(START_URL, max_pages=2, max_depth=1)
 
@@ -1246,6 +1251,7 @@ class CanonicalSeoAuditTests(unittest.TestCase):
 
         with patch("crawler.httpx.get", side_effect=fake_get), \
              patch("crawler.httpx.head", side_effect=fake_head), \
+             patch.object(crawler, "EXTERNAL_LINK_VERIFICATION_ENABLED", False), \
              patch("crawler.time.sleep"):
             pages = crawler.crawl_website(page_url, max_pages=1, max_depth=0)
         return pages[0], head_calls
@@ -2487,6 +2493,7 @@ class InternalLinkStructureAuditTests(unittest.TestCase):
 
         with patch("crawler.httpx.get", side_effect=fake_get), \
              patch("crawler.httpx.head", side_effect=fake_head), \
+             patch.object(crawler, "EXTERNAL_LINK_VERIFICATION_ENABLED", False), \
              patch("crawler.time.sleep"):
             return crawler.crawl_website(
                 START_URL,
@@ -3171,6 +3178,7 @@ class SitemapAndRobotsAuditTests(unittest.TestCase):
 
         with patch("crawler.httpx.get", side_effect=fake_get), \
              patch("crawler.httpx.head", side_effect=fake_head), \
+             patch.object(crawler, "EXTERNAL_LINK_VERIFICATION_ENABLED", False), \
              patch("crawler.time.sleep"):
             pages = crawler.crawl_website(START_URL, max_pages=5, max_depth=2)
 
@@ -3452,8 +3460,11 @@ class SecurityAndHttpsAuditTests(unittest.TestCase):
                 '<a href="http://external.org/out">External HTTP Link</a>'
             ),
         )
-        self.assertEqual(len(page["seo_issues"]), 1)
-        issue = page["seo_issues"][0]
+        security_issues = [
+            i for i in page["seo_issues"] if i["type"] in crawler.SECURITY_ISSUE_TYPES
+        ]
+        self.assertEqual(len(security_issues), 1)
+        issue = security_issues[0]
         self.assertEqual(issue["type"], "http_internal_link")
         self.assertEqual(issue["severity"], "warning")
         self.assertEqual(
@@ -3462,6 +3473,9 @@ class SecurityAndHttpsAuditTests(unittest.TestCase):
                 "http://example.com/insecure-page",
                 "http://EXAMPLE.COM/second-insecure",
             ],
+        )
+        self.assertTrue(
+            any(i["type"] == "external_link_to_http" for i in page["seo_issues"])
         )
 
     def test_mixed_content_and_internal_vs_external_http_resources(self):
@@ -3667,6 +3681,317 @@ class SecurityAndHttpsAuditTests(unittest.TestCase):
             content_type="application/json",
         )
         self.assertEqual(json_page["seo_issues"], [])
+
+
+class ExternalLinkAndSafetyAuditTests(unittest.TestCase):
+    def build_test_page_html(self, links_html: str) -> str:
+        return (
+            "<!DOCTYPE html>"
+            '<html lang="en"><head><title>External Test</title>'
+            f'<link rel="canonical" href="{START_URL}">'
+            '<script type="application/ld+json">'
+            '{"@context":"https://schema.org","@type":"WebPage"}'
+            "</script></head>"
+            f"<body><main><h1>External Test</h1><p>{DEFAULT_BODY_WORDS}</p>{links_html}</main></body></html>"
+        )
+
+    def crawl_with_external_links(
+        self,
+        links_html: str,
+        external_map: dict[str, Any] | None = None,
+        verification_enabled: bool = True,
+        max_external_checks: int = 50,
+    ) -> dict[str, Any]:
+        html = self.build_test_page_html(links_html)
+        if external_map is None:
+            external_map = {}
+
+        def fake_get(url, **_):
+            if url.endswith("/robots.txt"):
+                return make_response("GET", url, 200, ROBOTS_TXT)
+            if url.endswith("/sitemap.xml"):
+                return make_sitemap_response(url, (START_URL,))
+            return make_response("GET", url, 200, html)
+
+        def fake_head(url, **kwargs):
+            if url in external_map:
+                outcome = external_map[url]
+                if isinstance(outcome, Exception):
+                    raise outcome
+                if isinstance(outcome, tuple):
+                    status, loc = outcome
+                    headers = {"location": loc} if loc else {}
+                    return make_response("HEAD", url, status, extra_headers=headers)
+                if isinstance(outcome, int):
+                    return make_response("HEAD", url, outcome)
+                return outcome
+            return make_response("HEAD", url, 200)
+
+        def fake_resolve(hostname):
+            if hostname in ("localhost", "internal.corp") or hostname.endswith(
+                (".local", ".internal", ".lan")
+            ):
+                return ["127.0.0.1"]
+            return ["93.184.216.34"]
+
+        with patch("crawler.httpx.get", side_effect=fake_get), \
+             patch("crawler.httpx.head", side_effect=fake_head), \
+             patch.object(crawler, "_resolve_hostname_ips", side_effect=fake_resolve), \
+             patch.object(crawler, "EXTERNAL_LINK_VERIFICATION_ENABLED", verification_enabled), \
+             patch.object(crawler, "MAX_EXTERNAL_LINK_CHECKS", max_external_checks), \
+             patch("crawler.time.sleep"):
+            pages = crawler.crawl_website(START_URL, max_pages=1, max_depth=0)
+        return pages[0]
+
+    def test_broken_external_link_detected_4xx_and_5xx(self):
+        page = self.crawl_with_external_links(
+            '<a href="https://ext.example.org/missing">Missing</a>'
+            '<a href="https://ext.example.org/server-error">Error</a>',
+            external_map={
+                "https://ext.example.org/missing": 404,
+                "https://ext.example.org/server-error": 500,
+            },
+        )
+        broken_issues = [
+            i for i in page["seo_issues"] if i["type"] == "broken_external_link"
+        ]
+        self.assertEqual(len(broken_issues), 1)
+        issue = broken_issues[0]
+        self.assertEqual(issue["severity"], "warning")
+        self.assertEqual(
+            issue["external_urls"],
+            [
+                "https://ext.example.org/missing",
+                "https://ext.example.org/server-error",
+            ],
+        )
+        self.assertIn("https://ext.example.org/missing (HTTP 404)", issue["message"])
+
+    def test_working_external_link_produces_no_error_issue(self):
+        page = self.crawl_with_external_links(
+            '<a href="https://ext.example.org/valid">Working</a>',
+            external_map={"https://ext.example.org/valid": 200},
+        )
+        error_types = {
+            "broken_external_link",
+            "external_redirect",
+            "external_link_timeout",
+            "external_link_ssl_error",
+        }
+        found_error_types = [
+            i["type"] for i in page["seo_issues"] if i["type"] in error_types
+        ]
+        self.assertEqual(found_error_types, [])
+        self.assertEqual(page["outgoing_external_links"], 1)
+
+    def test_external_redirect_recorded_with_destination_and_status(self):
+        page = self.crawl_with_external_links(
+            '<a href="https://ext.example.org/old">Old Link</a>',
+            external_map={
+                "https://ext.example.org/old": (301, "https://ext.example.org/new"),
+                "https://ext.example.org/new": 200,
+            },
+        )
+        redirect_issues = [
+            i for i in page["seo_issues"] if i["type"] == "external_redirect"
+        ]
+        self.assertEqual(len(redirect_issues), 1)
+        issue = redirect_issues[0]
+        self.assertEqual(issue["severity"], "info")
+        self.assertEqual(issue["source_url"], "https://ext.example.org/old")
+        self.assertEqual(issue["destination_url"], "https://ext.example.org/new")
+        self.assertEqual(issue["status_code"], 301)
+        self.assertEqual(
+            issue["redirect_chain"],
+            ["https://ext.example.org/old", "https://ext.example.org/new"],
+        )
+
+    def test_external_link_timeout_detected(self):
+        page = self.crawl_with_external_links(
+            '<a href="https://ext.example.org/slow">Slow External</a>',
+            external_map={
+                "https://ext.example.org/slow": httpx.TimeoutException("timed out")
+            },
+        )
+        timeout_issues = [
+            i for i in page["seo_issues"] if i["type"] == "external_link_timeout"
+        ]
+        self.assertEqual(len(timeout_issues), 1)
+        issue = timeout_issues[0]
+        self.assertEqual(issue["severity"], "warning")
+        self.assertEqual(issue["external_urls"], ["https://ext.example.org/slow"])
+
+    def test_external_link_ssl_error_detected(self):
+        page = self.crawl_with_external_links(
+            '<a href="https://ext.example.org/bad-cert">Bad SSL</a>',
+            external_map={
+                "https://ext.example.org/bad-cert": httpx.RequestError(
+                    "certificate verify failed: self signed certificate"
+                )
+            },
+        )
+        ssl_issues = [
+            i for i in page["seo_issues"] if i["type"] == "external_link_ssl_error"
+        ]
+        self.assertEqual(len(ssl_issues), 1)
+        issue = ssl_issues[0]
+        self.assertEqual(issue["severity"], "warning")
+        self.assertEqual(issue["external_urls"], ["https://ext.example.org/bad-cert"])
+
+    def test_target_blank_rel_noopener_and_noreferrer_rules(self):
+        page = self.crawl_with_external_links(
+            '<a href="https://ext.example.org/none" target="_blank">No Rel</a>'
+            '<a href="https://ext.example.org/only-noopener" target="_blank" rel="noopener">Only Noopener</a>'
+            '<a href="https://ext.example.org/safe" target="_blank" rel="noopener noreferrer">Both</a>'
+            '<a href="https://ext.example.org/noreferrer-only" target="_blank" rel="noreferrer">Noreferrer Only</a>'
+        )
+        by_type = {i["type"]: i for i in page["seo_issues"]}
+        self.assertIn("external_link_target_blank_noopener", by_type)
+        self.assertEqual(by_type["external_link_target_blank_noopener"]["severity"], "warning")
+        self.assertEqual(
+            by_type["external_link_target_blank_noopener"]["external_urls"],
+            ["https://ext.example.org/none"],
+        )
+
+        self.assertIn("external_link_target_blank_noreferrer", by_type)
+        self.assertEqual(by_type["external_link_target_blank_noreferrer"]["severity"], "info")
+        self.assertEqual(
+            by_type["external_link_target_blank_noreferrer"]["external_urls"],
+            ["https://ext.example.org/only-noopener"],
+        )
+
+    def test_external_link_to_http_detected(self):
+        page = self.crawl_with_external_links(
+            '<a href="http://ext.example.org/page">Insecure HTTP External</a>'
+        )
+        http_issues = [
+            i for i in page["seo_issues"] if i["type"] == "external_link_to_http"
+        ]
+        self.assertEqual(len(http_issues), 1)
+        self.assertEqual(http_issues[0]["severity"], "warning")
+        self.assertEqual(
+            http_issues[0]["external_urls"],
+            ["http://ext.example.org/page"],
+        )
+
+    def test_nofollow_sponsored_ugc_external_links_detected(self):
+        page = self.crawl_with_external_links(
+            '<a href="https://ext.example.org/sponsored" rel="sponsored">Ad</a>'
+            '<a href="https://ext.example.org/ugc" rel="ugc">Comment</a>'
+            '<a href="https://ext.example.org/nf" rel="nofollow">NoFollow</a>'
+        )
+        rel_issues = [
+            i for i in page["seo_issues"] if i["type"] == "nofollow_external_link"
+        ]
+        self.assertEqual(len(rel_issues), 1)
+        issue = rel_issues[0]
+        self.assertEqual(issue["severity"], "info")
+        self.assertEqual(issue["rel_values"], ["nofollow", "sponsored", "ugc"])
+        self.assertEqual(len(issue["external_urls"]), 3)
+
+    def test_excessive_external_links_threshold(self):
+        links = "".join(
+            f'<a href="https://ext{i}.example.org/p">Ext {i}</a>'
+            for i in range(55)
+        )
+        page = self.crawl_with_external_links(links)
+        excessive_issues = [
+            i for i in page["seo_issues"] if i["type"] == "excessive_external_links"
+        ]
+        self.assertEqual(len(excessive_issues), 1)
+        issue = excessive_issues[0]
+        self.assertEqual(issue["severity"], "warning")
+        self.assertEqual(issue["outgoing_external_links"], 55)
+
+    def test_max_external_link_checks_limit_and_unverified_limit(self):
+        links = "".join(
+            f'<a href="https://ext{i}.example.org/p">Ext {i}</a>'
+            for i in range(5)
+        )
+        page = self.crawl_with_external_links(
+            links,
+            max_external_checks=2,
+        )
+        summary = crawler.summarize_external_links([page])
+        self.assertEqual(summary["unique_external_urls"], 5)
+        self.assertEqual(summary["verified_count"], 2)
+        self.assertEqual(summary["unverified_count"], 3)
+        self.assertTrue(summary["limit_reached"])
+        self.assertFalse(summary["verification_disabled"])
+
+    def test_verification_disabled_marks_links_unverified_disabled(self):
+        links = '<a href="https://ext.example.org/a">A</a>'
+        page = self.crawl_with_external_links(
+            links,
+            verification_enabled=False,
+        )
+        summary = crawler.summarize_external_links([page])
+        self.assertEqual(summary["unique_external_urls"], 1)
+        self.assertEqual(summary["verified_count"], 0)
+        self.assertEqual(summary["unverified_count"], 1)
+        self.assertTrue(summary["verification_disabled"])
+
+    def test_ssrf_safety_checks_block_private_and_internal_targets(self):
+        unsafe_urls = [
+            "http://localhost/admin",
+            "http://127.0.0.1/status",
+            "http://10.0.0.1/private",
+            "http://172.16.0.1/intranet",
+            "http://192.168.1.1/router",
+            "http://169.254.169.254/latest/meta-data",
+            "http://[::1]/internal",
+            "http://service.local/api",
+            "http://database.internal/query",
+            "http://intranet.lan/home",
+            "ftp://example.com/file",
+        ]
+        for url in unsafe_urls:
+            is_safe, reason = crawler._check_external_target_safety(url)
+            self.assertFalse(is_safe, f"Expected {url} to be unsafe, reason: {reason}")
+
+        safe_url = "https://93.184.216.34/page"
+        is_safe, _ = crawler._check_external_target_safety(safe_url)
+        self.assertTrue(is_safe)
+
+    def test_duplicate_external_urls_deduplicated_per_page(self):
+        page = self.crawl_with_external_links(
+            '<a href="https://ext.example.org/same">Link 1</a>'
+            '<a href="https://ext.example.org/same">Link 2</a>'
+            '<a href="https://ext.example.org/same#section">Link 3</a>'
+        )
+        self.assertEqual(page["outgoing_external_links"], 1)
+        self.assertEqual(len(page["external_links"]), 1)
+
+    def test_summarize_external_links_aggregation(self):
+        pages = [
+            {
+                "url": "https://example.com/p1",
+                "external_links": [
+                    {"url": "https://ext1.org/", "verification_status": "working"},
+                    {"url": "https://ext2.org/", "verification_status": "broken"},
+                    {"url": "https://ext3.org/", "verification_status": "redirect"},
+                ],
+            },
+            {
+                "url": "https://example.com/p2",
+                "external_links": [
+                    {"url": "https://ext1.org/", "verification_status": "working"},
+                    {"url": "https://ext4.org/", "verification_status": "timeout"},
+                    {"url": "https://ext5.org/", "verification_status": "ssl_error"},
+                    {"url": "https://ext6.org/", "verification_status": "blocked"},
+                ],
+            },
+        ]
+        summary = crawler.summarize_external_links(pages)
+        self.assertEqual(summary["unique_external_urls"], 6)
+        self.assertEqual(summary["verified_count"], 3)  # working, broken, redirect
+        self.assertEqual(summary["broken_count"], 1)
+        self.assertEqual(summary["redirect_count"], 1)
+        self.assertEqual(summary["verification_failures_count"], 2)  # timeout, ssl_error
+        self.assertEqual(summary["blocked_count"], 1)
+        self.assertEqual(summary["unverified_count"], 0)
+        self.assertFalse(summary["limit_reached"])
+        self.assertFalse(summary["verification_disabled"])
 
 
 if __name__ == "__main__":
