@@ -27,6 +27,7 @@ PAGE = {
     "outgoing_external_links": 0,
     "hreflang_count": 0,
     "has_open_graph": False,
+    "readability_score": None,
     "is_https": True,
     "in_sitemap": True,
     "content_type": "text/html",

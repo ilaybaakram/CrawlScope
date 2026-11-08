@@ -17,6 +17,7 @@ const PAGE_FIELDS = [
   "outgoing_external_links",
   "hreflang_count",
   "has_open_graph",
+  "readability_score",
   "content_type",
   "response_time_ms",
   "page_size_bytes",
@@ -87,6 +88,19 @@ const SOCIAL_ISSUE_TYPES = new Set([
   "short_og_description",
   "long_og_description",
   "social_image_missing_alt",
+]);
+
+const READABILITY_ISSUE_TYPES = new Set([
+  "missing_primary_heading",
+  "multiple_primary_headings",
+  "heading_content_mismatch",
+  "keyword_stuffing",
+  "low_content_readability",
+  "short_paragraphs",
+  "long_paragraphs",
+  "missing_subheadings",
+  "heading_repetition",
+  "weak_content_relevance",
 ]);
 
 const LINK_FIELDS = ["url", "found_on", "status_code", "result", "error"];
@@ -381,6 +395,43 @@ function App() {
       ).length,
       info: seoIssues.filter(
         (i) => SOCIAL_ISSUE_TYPES.has(i.type) && i.severity === "info"
+      ).length,
+    },
+  };
+  const readabilitySummary = crawlData?.readability_summary || {
+    pages_audited_count: pages.filter((p) => p.status_code === 200).length,
+    pages_with_issues_count: pages.filter(
+      (p) =>
+        Array.isArray(p.seo_issues) &&
+        p.seo_issues.some((i) => READABILITY_ISSUE_TYPES.has(i.type))
+    ).length,
+    keyword_stuffing_count: seoIssues.filter(
+      (i) => i.type === "keyword_stuffing"
+    ).length,
+    low_readability_count: seoIssues.filter(
+      (i) => i.type === "low_content_readability"
+    ).length,
+    heading_issues_count: seoIssues.filter((i) =>
+      [
+        "missing_primary_heading",
+        "multiple_primary_headings",
+        "heading_content_mismatch",
+        "missing_subheadings",
+        "heading_repetition",
+      ].includes(i.type)
+    ).length,
+    total_readability_issues: seoIssues.filter((i) =>
+      READABILITY_ISSUE_TYPES.has(i.type)
+    ).length,
+    severity_counts: {
+      error: seoIssues.filter(
+        (i) => READABILITY_ISSUE_TYPES.has(i.type) && i.severity === "error"
+      ).length,
+      warning: seoIssues.filter(
+        (i) => READABILITY_ISSUE_TYPES.has(i.type) && i.severity === "warning"
+      ).length,
+      info: seoIssues.filter(
+        (i) => READABILITY_ISSUE_TYPES.has(i.type) && i.severity === "info"
       ).length,
     },
   };
@@ -744,6 +795,50 @@ function App() {
 
       <section className="card">
         <div className="section-header">
+          <h2>Content Readability & Keyword Summary</h2>
+          <div className="seo-metrics">
+            <span className="metric-badge">
+              Pages Audited:{" "}
+              <strong>
+                {crawlData ? readabilitySummary.pages_audited_count : 0}
+              </strong>
+            </span>
+            <span className="metric-badge">
+              Pages with Issues:{" "}
+              <strong>
+                {crawlData ? readabilitySummary.pages_with_issues_count : 0}
+              </strong>
+            </span>
+            <span className="metric-badge">
+              Keyword Stuffing:{" "}
+              <strong>
+                {crawlData ? readabilitySummary.keyword_stuffing_count : 0}
+              </strong>
+            </span>
+            <span className="metric-badge">
+              Low Readability:{" "}
+              <strong>
+                {crawlData ? readabilitySummary.low_readability_count : 0}
+              </strong>
+            </span>
+            <span className="metric-badge">
+              Heading Issues:{" "}
+              <strong>
+                {crawlData ? readabilitySummary.heading_issues_count : 0}
+              </strong>
+            </span>
+            <span className="metric-badge">
+              Total Readability Findings:{" "}
+              <strong>
+                {crawlData ? readabilitySummary.total_readability_issues : 0}
+              </strong>
+            </span>
+          </div>
+        </div>
+      </section>
+
+      <section className="card">
+        <div className="section-header">
           <h2>Download Crawl Results</h2>
           {!crawlData && (
             <span className="section-hint">
@@ -812,6 +907,7 @@ function App() {
                   <th>Outgoing External</th>
                   <th>Hreflang</th>
                   <th>Open Graph</th>
+                  <th>Readability</th>
                   <th>HTTPS</th>
                   <th>Security</th>
                   <th>In Sitemap</th>
@@ -865,6 +961,24 @@ function App() {
                         <span className="status-pill status-ok">Yes</span>
                       ) : (
                         <span className="status-pill status-warning">No</span>
+                      )}
+                    </td>
+                    <td>
+                      {page.readability_score !== null &&
+                      page.readability_score !== undefined ? (
+                        <span
+                          className={`status-pill ${
+                            page.readability_score >= 60
+                              ? "status-ok"
+                              : page.readability_score >= 30
+                              ? "status-warning"
+                              : "status-bad"
+                          }`}
+                        >
+                          {page.readability_score}
+                        </span>
+                      ) : (
+                        "—"
                       )}
                     </td>
                     <td>

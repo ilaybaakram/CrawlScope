@@ -9,6 +9,7 @@ from crawler import (
     crawl_website,
     summarize_external_links,
     summarize_hreflang_audit,
+    summarize_readability_audit,
     summarize_security_audit,
     summarize_sitemap_coverage,
     summarize_social_audit,
@@ -81,6 +82,7 @@ def run_crawl(request: CrawlRequest) -> dict[str, Any]:
         "external_link_summary": summarize_external_links(pages),
         "hreflang_summary": summarize_hreflang_audit(pages),
         "social_summary": summarize_social_audit(pages),
+        "readability_summary": summarize_readability_audit(pages),
         "pages": pages,
         "links": links,
     }

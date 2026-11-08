@@ -4827,6 +4827,295 @@ class SocialSharingAuditTests(unittest.TestCase):
         self.assertEqual(social_issues, [])
 
 
+class ContentReadabilityAndKeywordAuditTests(unittest.TestCase):
+    def make_soup(
+        self,
+        body_html: str,
+        title: str = "Guide to Modern Web Development",
+    ) -> BeautifulSoup:
+        html = (
+            f'<!DOCTYPE html><html lang="en"><head>'
+            f'<title>{title}</title>'
+            f'</head><body>{body_html}</body></html>'
+        )
+        return BeautifulSoup(html, "html.parser")
+
+    def test_clean_accessible_page_produces_no_readability_issues(self):
+        body = (
+            '<h1>Guide to Modern Web Development</h1>'
+            '<h2>Introduction and Overview</h2>'
+            '<p>Web development is a fun and rewarding process for beginners everywhere. '
+            'You start by writing simple code using text and basic style rules to format your paragraphs nicely.</p>'
+            '<p>Good design helps readers find the facts they need quickly without getting confused by messy pages. '
+            'Clear words and bright pictures will make your website welcoming to all visitors on the web.</p>'
+            '<p>Always test your site on mobile devices and computers to make sure it works well for everyone. '
+            'Fast page loads and simple navigation keep people happy and engaged with your online content.</p>'
+        )
+        soup = self.make_soup(body, title="Guide to Modern Web Development")
+        issues = crawler.detect_readability_and_keyword_issues(
+            "https://example.com/guide",
+            soup,
+            content_type="text/html; charset=utf-8",
+        )
+        self.assertEqual(issues, [])
+
+    def test_missing_primary_heading_detected(self):
+        # No H1 heading
+        body = (
+            '<h2>Overview</h2>'
+            '<p>This page provides helpful guidance on various topics but neglects to supply an H1 heading at the top of the body.</p>'
+        )
+        soup = self.make_soup(body)
+        issues = crawler.detect_readability_and_keyword_issues("https://example.com/", soup)
+        types = [i["type"] for i in issues]
+        self.assertIn("missing_primary_heading", types)
+
+        # Hidden H1 heading
+        body_hidden = (
+            '<h1 style="display:none">Hidden Primary Heading</h1>'
+            '<p>Visible text discussing web development topics.</p>'
+        )
+        soup_hidden = self.make_soup(body_hidden)
+        issues_hidden = crawler.detect_readability_and_keyword_issues("https://example.com/", soup_hidden)
+        types_hidden = [i["type"] for i in issues_hidden]
+        self.assertIn("missing_primary_heading", types_hidden)
+
+    def test_multiple_primary_headings_detected(self):
+        body = (
+            '<h1>First Primary Heading</h1>'
+            '<p>Some content in the first section.</p>'
+            '<h1>Second Primary Heading</h1>'
+            '<p>Some content in the second section.</p>'
+        )
+        soup = self.make_soup(body)
+        issues = crawler.detect_readability_and_keyword_issues("https://example.com/", soup)
+        types = [i["type"] for i in issues]
+        self.assertIn("multiple_primary_headings", types)
+
+    def test_heading_content_mismatch_detected(self):
+        body = (
+            '<h1>Gourmet Italian Pasta Recipes</h1>'
+            '<p>Learn how to make handmade pasta dough and slow-simmered marinara sauce with authentic ingredients.</p>'
+        )
+        soup = self.make_soup(body, title="Automobile Engine Repair Manual")
+        issues = crawler.detect_readability_and_keyword_issues("https://example.com/", soup)
+        types = [i["type"] for i in issues]
+        self.assertIn("heading_content_mismatch", types)
+
+    def test_heading_content_match_when_terms_overlap(self):
+        body = (
+            '<h1>Engine Repair and Diagnostics Manual</h1>'
+            '<p>Step by step instructions for diagnosing check engine lights and repairing mechanical issues.</p>'
+        )
+        soup = self.make_soup(body, title="Automobile Engine Repair Manual")
+        issues = crawler.detect_readability_and_keyword_issues("https://example.com/", soup)
+        types = [i["type"] for i in issues]
+        self.assertNotIn("heading_content_mismatch", types)
+
+    def test_keyword_stuffing_detected(self):
+        words = ["insurance"] * 12 + [
+            "coverage", "policy", "premium", "driver", "vehicle", "protection", "accident", "liability",
+            "comprehensive", "deductible", "claim", "damage", "repair", "safety", "licensed", "provider",
+            "agency", "benefits", "contract", "financial", "security", "customer", "support", "evaluation",
+            "agreement", "options", "discounts", "eligibility", "payment", "renewal", "guarantee", "advisory",
+            "assistance", "roadside", "towing", "inspection", "compliance", "regulatory", "standard", "guidelines",
+            "brochure", "information", "statement", "document", "certified", "package", "portfolio", "solution",
+            "consultant", "estimate"
+        ]
+        body = f'<h1>Vehicle Coverage Details</h1><p>{" ".join(words)}.</p>'
+        soup = self.make_soup(body, title="Vehicle Coverage Details")
+        issues = crawler.detect_readability_and_keyword_issues("https://example.com/", soup)
+        types = [i["type"] for i in issues]
+        self.assertIn("keyword_stuffing", types)
+
+    def test_low_content_readability_detected(self):
+        complex_text = (
+            "Notwithstanding aforementioned circumstantial contingencies, institutionalized incomprehensibility "
+            "systematically exacerbates epistemological obfuscation throughout interconnected organizational infrastructures. "
+            "Consequently, interdisciplinary sociopolitical operationalizations counterproductively mischaracterize "
+            "fundamental phenomenological methodologies through multifaceted disproportionality. "
+            "Furthermore, uncompromising philosophical intellectualizations persistently misunderstand "
+            "incomprehensible institutionalization paradigms within hypercomplex environments. "
+            "Simultaneously, uncharacteristically counterintuitive conceptualizations indiscriminately "
+            "disproportionate multidisciplinary compartmentalization across institutional frameworks. "
+            "Therefore, nonstandardized transdisciplinary operationalization fundamentally destabilizes "
+            "epistemological systematization across contemporary sociohistorical contexts."
+        )
+        body = f'<h1>Philosophical Epistemology</h1><p>{complex_text}</p>'
+        soup = self.make_soup(body, title="Philosophical Epistemology")
+        issues = crawler.detect_readability_and_keyword_issues("https://example.com/", soup)
+        types = [i["type"] for i in issues]
+        self.assertIn("low_content_readability", types)
+
+    def test_short_paragraphs_detected(self):
+        body = (
+            '<h1>Brief Overview</h1>'
+            '<p>First brief paragraph.</p>'
+            '<p>Second tiny sentence here.</p>'
+            '<p>Third very short note.</p>'
+            '<p>This fourth paragraph provides a much more detailed and substantial explanation containing plenty of words to describe the background story in full detail.</p>'
+        )
+        soup = self.make_soup(body, title="Brief Overview")
+        issues = crawler.detect_readability_and_keyword_issues("https://example.com/", soup)
+        types = [i["type"] for i in issues]
+        self.assertIn("short_paragraphs", types)
+
+    def test_long_paragraphs_detected(self):
+        sentence = "Exploring the historical evolution of modern software architecture reveals many interesting insights into software craftsmanship and dependable design patterns. "
+        long_paragraph = sentence * 12
+        body = f'<h1>Software Architecture History</h1><p>{long_paragraph}</p>'
+        soup = self.make_soup(body, title="Software Architecture History")
+        issues = crawler.detect_readability_and_keyword_issues("https://example.com/", soup)
+        types = [i["type"] for i in issues]
+        self.assertIn("long_paragraphs", types)
+
+    def test_missing_subheadings_detected(self):
+        # 600+ words across moderate paragraphs without any h2 or h3
+        unit = "Software systems require careful planning and testing to ensure reliability and speed for every person using the system on a daily basis. "
+        p1 = unit * 5
+        p2 = unit * 5
+        p3 = unit * 5
+        p4 = unit * 5
+        p5 = unit * 5
+        p6 = unit * 5
+        body = f'<h1>Comprehensive Engineering Guide</h1><p>{p1}</p><p>{p2}</p><p>{p3}</p><p>{p4}</p><p>{p5}</p><p>{p6}</p>'
+        soup = self.make_soup(body, title="Comprehensive Engineering Guide")
+        issues = crawler.detect_readability_and_keyword_issues("https://example.com/", soup)
+        types = [i["type"] for i in issues]
+        self.assertIn("missing_subheadings", types)
+
+    def test_heading_repetition_detected(self):
+        body = (
+            '<h1>Software Guide</h1>'
+            '<h2>System Overview</h2><p>Overview of the front-end architecture.</p>'
+            '<h2>System Overview</h2><p>Overview of the back-end architecture.</p>'
+        )
+        soup = self.make_soup(body, title="Software Guide")
+        issues = crawler.detect_readability_and_keyword_issues("https://example.com/", soup)
+        types = [i["type"] for i in issues]
+        self.assertIn("heading_repetition", types)
+
+    def test_weak_content_relevance_detected(self):
+        bread_sentences = (
+            "Baking delicious artisan sourdough bread requires patience, sourdough starter, water, salt, and flour. "
+            "Knead the dough gently and allow it to ferment in a warm environment for several hours until doubled in size. "
+            "Preheat the Dutch oven to high temperature before carefully transferring the dough for baking. "
+            "The resulting loaf has a delightfully crisp golden crust and a soft airy crumb structure that everyone loves. "
+            "Serve freshly sliced sourdough bread with creamy butter or olive oil for breakfast or dinner with family. "
+            "Store leftover slices in a paper bag to keep the crust crunchy and fresh for several days at room temperature."
+        )
+        body = f'<h1>Quantum Propulsion Systems</h1><p>{bread_sentences}</p>'
+        soup = self.make_soup(body, title="Aerospace Rocket Propulsion Engineering")
+        issues = crawler.detect_readability_and_keyword_issues("https://example.com/", soup)
+        types = [i["type"] for i in issues]
+        self.assertIn("weak_content_relevance", types)
+
+    def test_calculate_flesch_reading_ease_scores(self):
+        # Text with fewer than 60 words returns None
+        self.assertIsNone(crawler.calculate_flesch_reading_ease("Too short to evaluate readability accurately."))
+
+        # Simple, readable text returns score >= 60
+        simple_text = (
+            "The dog saw the cat. The cat ran up a tall tree. "
+            "The dog sat down on the soft green grass and barked loudly. "
+            "A little boy came out of the red house and called the dog. "
+            "The dog was happy and ran back home to eat his lunch. "
+            "The day was warm and bright with blue skies and gentle winds all afternoon."
+        )
+        score = crawler.calculate_flesch_reading_ease(simple_text)
+        self.assertIsNotNone(score)
+        self.assertGreaterEqual(score, 60.0)
+
+    def test_malformed_html_and_non_html_ignored(self):
+        # Non-HTML content type
+        soup = self.make_soup("<h1>Title</h1><p>Text</p>")
+        issues = crawler.detect_readability_and_keyword_issues(
+            "https://example.com/file.pdf",
+            soup,
+            content_type="application/pdf",
+        )
+        self.assertEqual(issues, [])
+
+        # None soup
+        self.assertEqual(crawler.detect_readability_and_keyword_issues("https://example.com/", None), [])
+
+    def test_summarize_readability_audit(self):
+        sample_pages = [
+            {
+                "status_code": 200,
+                "seo_issues": [
+                    {"type": "missing_primary_heading", "severity": "warning"},
+                    {"type": "keyword_stuffing", "severity": "warning"},
+                ],
+            },
+            {
+                "status_code": 200,
+                "seo_issues": [
+                    {"type": "low_content_readability", "severity": "info"},
+                ],
+            },
+            {
+                "status_code": 200,
+                "seo_issues": [],
+            },
+            {
+                "status_code": 500,
+                "seo_issues": [],
+            },
+        ]
+        summary = crawler.summarize_readability_audit(sample_pages)
+        self.assertEqual(summary["pages_audited_count"], 3)
+        self.assertEqual(summary["pages_with_issues_count"], 2)
+        self.assertEqual(summary["keyword_stuffing_count"], 1)
+        self.assertEqual(summary["low_readability_count"], 1)
+        self.assertEqual(summary["heading_issues_count"], 1)
+        self.assertEqual(summary["total_readability_issues"], 3)
+        self.assertEqual(summary["severity_counts"]["warning"], 2)
+        self.assertEqual(summary["severity_counts"]["info"], 1)
+        self.assertEqual(summary["severity_counts"]["error"], 0)
+
+    def test_crawl_website_populates_readability_score_and_summary(self):
+        url = "https://example.com/clean-article"
+        html = (
+            '<!DOCTYPE html><html lang="en"><head>'
+            '<title>Guide to Modern Web Development</title>'
+            '<meta name="description" content="A comprehensive tutorial on modern web development practices and tools.">'
+            f'<link rel="canonical" href="{url}">'
+            '<script type="application/ld+json">{"@context":"https://schema.org","@type":"Article"}</script>'
+            '</head><body><main>'
+            '<h1>Guide to Modern Web Development</h1>'
+            '<h2>Introduction and Overview</h2>'
+            '<p>Web development is a fun and rewarding process for beginners everywhere. '
+            'You start by writing simple code using text and basic style rules to format your paragraphs nicely.</p>'
+            '<p>Good design helps readers find the facts they need quickly without getting confused by messy pages. '
+            'Clear words and bright pictures will make your website welcoming to all visitors on the web.</p>'
+            '<p>Always test your site on mobile devices and computers to make sure it works well for everyone. '
+            'Fast page loads and simple navigation keep people happy and engaged with your online content.</p>'
+            '</main></body></html>'
+        )
+
+        def fake_get(target_url, **_):
+            if target_url.endswith("/robots.txt"):
+                return make_response("GET", target_url, 200, ROBOTS_TXT)
+            if target_url.endswith("/sitemap.xml"):
+                return make_sitemap_response(target_url, (url,))
+            return make_response("GET", target_url, 200, html, content_type="text/html; charset=utf-8")
+
+        with patch("crawler.httpx.get", side_effect=fake_get), \
+             patch("crawler.httpx.head", return_value=make_response("HEAD", url, 200)), \
+             patch("crawler.time.sleep"):
+            pages = crawler.crawl_website(url, max_pages=1, max_depth=0)
+
+        self.assertEqual(len(pages), 1)
+        page = pages[0]
+        self.assertIsNotNone(page["readability_score"])
+        self.assertIsInstance(page["readability_score"], float)
+        readability_issues = [
+            i for i in page["seo_issues"] if i["type"] in crawler.READABILITY_ISSUE_TYPES
+        ]
+        self.assertEqual(readability_issues, [])
+
+
 if __name__ == "__main__":
     unittest.main()
 

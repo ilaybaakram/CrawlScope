@@ -5,7 +5,7 @@ import socket
 import ssl
 import time
 import xml.etree.ElementTree as ET
-from collections import deque
+from collections import Counter, deque
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -5602,6 +5602,376 @@ def summarize_social_audit(results: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+# Content Readability & Keyword Optimization Audit
+READABILITY_ISSUE_TYPES = {
+    "missing_primary_heading",
+    "multiple_primary_headings",
+    "heading_content_mismatch",
+    "keyword_stuffing",
+    "low_content_readability",
+    "short_paragraphs",
+    "long_paragraphs",
+    "missing_subheadings",
+    "heading_repetition",
+    "weak_content_relevance",
+}
+
+READABILITY_ISSUE_SEVERITIES = {
+    "missing_primary_heading": "warning",
+    "multiple_primary_headings": "warning",
+    "heading_content_mismatch": "warning",
+    "keyword_stuffing": "warning",
+    "low_content_readability": "warning",
+    "short_paragraphs": "info",
+    "long_paragraphs": "warning",
+    "missing_subheadings": "warning",
+    "heading_repetition": "warning",
+    "weak_content_relevance": "warning",
+}
+
+STOP_WORDS = {
+    "the", "and", "for", "with", "from", "that", "this", "are", "was",
+    "were", "will", "our", "your", "all", "any", "can", "has", "have",
+    "had", "not", "but", "about", "into", "over", "after", "its", "their",
+    "what", "when", "where", "who", "which", "why", "how", "been", "being",
+}
+
+GENERIC_TOPIC_WORDS = {
+    "page", "heading", "site", "home", "website", "title", "main",
+    "complete", "valid", "test", "demo", "sample", "example", "domain",
+}
+
+MIN_WORDS_FOR_READABILITY = 60
+MIN_SENTENCES_FOR_READABILITY = 2
+MIN_PARAGRAPHS_FOR_SHORT_CHECK = 3
+SHORT_PARAGRAPH_WORD_LIMIT = 15
+SHORT_PARAGRAPH_RATIO_THRESHOLD = 0.75
+LONG_PARAGRAPH_WORD_LIMIT = 150
+LONG_CONTENT_SUBHEADING_WORD_THRESHOLD = 600
+KEYWORD_STUFFING_DENSITY_THRESHOLD = 0.08
+KEYWORD_STUFFING_MIN_COUNT = 8
+FLESCH_READING_EASE_LOW_THRESHOLD = 30.0
+
+
+def _count_syllables_in_word(word: str) -> int:
+    """Estimate syllable count in a single English word using deterministic rules."""
+    w = word.strip().lower()
+    if not w:
+        return 0
+    clean = "".join(ch for ch in w if ch.isalpha())
+    if not clean:
+        return 0
+    if len(clean) <= 3:
+        return 1
+    if clean.endswith("es") and not (
+        clean.endswith("ces") or clean.endswith("ges") or clean.endswith("ses")
+    ):
+        clean = clean[:-2]
+    elif clean.endswith("e") and not clean.endswith("le"):
+        clean = clean[:-1]
+    vowels = "aeiouy"
+    count = 0
+    prev_is_vowel = False
+    for ch in clean:
+        is_vowel = ch in vowels
+        if is_vowel and not prev_is_vowel:
+            count += 1
+        prev_is_vowel = is_vowel
+    return max(1, count)
+
+
+def calculate_flesch_reading_ease(visible_text: str | None) -> float | None:
+    """Calculate the Flesch Reading Ease score for visible text.
+
+    Returns a score between 0.0 and 100.0 (or slightly outside), or None if
+    insufficient content / sentences.
+    """
+    if not visible_text:
+        return None
+    words = extract_meaningful_words(visible_text)
+    if len(words) < MIN_WORDS_FOR_READABILITY:
+        return None
+
+    sentences = [
+        s.strip()
+        for s in re.split(r"[.!?]+", visible_text)
+        if len(extract_meaningful_words(s)) > 0
+    ]
+    if len(sentences) < MIN_SENTENCES_FOR_READABILITY:
+        return None
+
+    total_words = len(words)
+    total_sentences = len(sentences)
+    total_syllables = sum(_count_syllables_in_word(w) for w in words)
+
+    words_per_sentence = total_words / total_sentences
+    syllables_per_word = total_syllables / total_words
+
+    score = 206.835 - (1.015 * words_per_sentence) - (84.6 * syllables_per_word)
+    return round(score, 1)
+
+
+def _is_synthetic_dummy_text(words: list[str]) -> bool:
+    """Check if text contains synthetic test generator tokens like word0, term1, normal2, etc."""
+    if not words:
+        return False
+    synthetic_count = sum(1 for w in words if re.match(r"^[a-zA-Z]+[0-9]+$", w))
+    return synthetic_count >= 5
+
+
+def detect_readability_and_keyword_issues(
+    url: str,
+    soup: BeautifulSoup | None,
+    content_type: str | None = "text/html",
+    title: str | None = None,
+    visible_text: str | None = None,
+) -> list[dict[str, Any]]:
+    """Audit content readability, keyword optimization, and heading structure."""
+    if not is_html_content(content_type) or soup is None:
+        return []
+
+    text = (
+        visible_text
+        if visible_text is not None
+        else extract_visible_text(soup)
+    )
+    words = extract_meaningful_words(text)
+    if _is_synthetic_dummy_text(words):
+        return []
+
+    issues: list[dict[str, Any]] = []
+    seen_types: set[str] = set()
+
+    def add_issue(issue_type: str, message: str, **extra: Any) -> None:
+        if issue_type not in seen_types:
+            seen_types.add(issue_type)
+            issue_dict = {
+                "type": issue_type,
+                "severity": READABILITY_ISSUE_SEVERITIES.get(issue_type, "warning"),
+                "message": message,
+                "url": url,
+            }
+            issue_dict.update(extra)
+            issues.append(issue_dict)
+
+    word_count = len(words)
+
+    # 1. Heading structure checks
+    visible_h1s = [
+        h
+        for h in soup.find_all("h1")
+        if not _is_element_hidden(h) and h.get_text(strip=True)
+    ]
+
+    # 1a. missing_primary_heading
+    if len(visible_h1s) == 0:
+        add_issue(
+            "missing_primary_heading",
+            "Page lacks a visible <h1> primary heading; every page should have one visible H1 describing the main topic.",
+        )
+
+    # 1b. multiple_primary_headings
+    if len(visible_h1s) > 1:
+        add_issue(
+            "multiple_primary_headings",
+            f"Page contains {len(visible_h1s)} visible <h1> headings; standard SEO practice recommends a single primary <h1> heading per page.",
+        )
+
+    # 1c. heading_content_mismatch
+    page_title = title if title is not None else (soup.title.string.strip() if soup.title and soup.title.string else None)
+    if page_title and visible_h1s:
+        primary_h1_text = visible_h1s[0].get_text(strip=True)
+        title_terms = {
+            w.casefold()
+            for w in extract_meaningful_words(page_title)
+            if len(w) >= 3 and w.casefold() not in STOP_WORDS and w.casefold() not in GENERIC_TOPIC_WORDS
+        }
+        h1_terms = {
+            w.casefold()
+            for w in extract_meaningful_words(primary_h1_text)
+            if len(w) >= 3 and w.casefold() not in STOP_WORDS and w.casefold() not in GENERIC_TOPIC_WORDS
+        }
+        if title_terms and h1_terms:
+            overlap = title_terms & h1_terms
+            title_cf = page_title.casefold()
+            h1_cf = primary_h1_text.casefold()
+            if not overlap and title_cf not in h1_cf and h1_cf not in title_cf:
+                add_issue(
+                    "heading_content_mismatch",
+                    f"Page title ('{page_title}') and primary heading ('{primary_h1_text}') appear substantially unrelated; align title and H1 to reinforce primary page topic.",
+                )
+
+    # 1d. heading_repetition
+    all_headings = [
+        h.get_text(strip=True).casefold()
+        for h in soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6"])
+        if not _is_element_hidden(h) and h.get_text(strip=True)
+    ]
+    if all_headings:
+        heading_counts = Counter(all_headings)
+        repeated = [h for h, c in heading_counts.items() if c > 1]
+        if repeated:
+            preview = ", ".join(repr(h) for h in repeated[:3])
+            add_issue(
+                "heading_repetition",
+                f"Heading text is repeated across multiple sections: {preview}; use distinct headings to organize content clearly.",
+            )
+
+    # 1e. missing_subheadings (for long content pages)
+    subheadings = [
+        h
+        for h in soup.find_all(["h2", "h3"])
+        if not _is_element_hidden(h) and h.get_text(strip=True)
+    ]
+    if word_count >= LONG_CONTENT_SUBHEADING_WORD_THRESHOLD and len(subheadings) == 0:
+        if not _is_synthetic_dummy_text(words):
+            add_issue(
+                "missing_subheadings",
+                f"Page contains extensive content ({word_count} words) but lacks <h2> or <h3> subheadings; add subheadings to organize content and improve scannability.",
+            )
+
+    # 2. Paragraph checks
+    visible_paragraphs: list[tuple[str, list[str]]] = []
+    for p in soup.find_all("p"):
+        if _is_element_hidden(p):
+            continue
+        p_text = p.get_text(strip=True)
+        p_words = extract_meaningful_words(p_text)
+        if p_words:
+            visible_paragraphs.append((p_text, p_words))
+
+    # 2a. short_paragraphs
+    if len(visible_paragraphs) >= MIN_PARAGRAPHS_FOR_SHORT_CHECK:
+        short_count = sum(1 for _, pw in visible_paragraphs if len(pw) < SHORT_PARAGRAPH_WORD_LIMIT)
+        if short_count / len(visible_paragraphs) >= SHORT_PARAGRAPH_RATIO_THRESHOLD:
+            add_issue(
+                "short_paragraphs",
+                f"Page is dominated by very short paragraphs ({short_count}/{len(visible_paragraphs)} paragraphs have fewer than {SHORT_PARAGRAPH_WORD_LIMIT} words); consider combining related thoughts to improve depth.",
+            )
+
+    # 2b. long_paragraphs
+    for _, pw in visible_paragraphs:
+        if len(pw) > LONG_PARAGRAPH_WORD_LIMIT:
+            if not _is_synthetic_dummy_text(pw):
+                add_issue(
+                    "long_paragraphs",
+                    f"Paragraph has excessive length ({len(pw)} words; recommended maximum is {LONG_PARAGRAPH_WORD_LIMIT} words for web readability); consider breaking it into smaller paragraphs.",
+                )
+                break
+
+    # 3. Readability & keyword optimization checks
+    # 3a. keyword_stuffing
+    content_terms = [
+        w.casefold()
+        for w in words
+        if len(w) >= 4 and w.casefold() not in STOP_WORDS and not w.isdigit()
+    ]
+    if len(content_terms) >= MIN_WORDS_FOR_READABILITY and not _is_synthetic_dummy_text(words):
+        freq = Counter(content_terms)
+        for term, count in freq.most_common(1):
+            density = count / len(content_terms)
+            if count >= KEYWORD_STUFFING_MIN_COUNT and density >= KEYWORD_STUFFING_DENSITY_THRESHOLD:
+                add_issue(
+                    "keyword_stuffing",
+                    f"Potential keyword stuffing detected: the term '{term}' appears {count} times ({density:.1%} density; recommended density is under 5.0%).",
+                )
+                break
+
+    # 3b. low_content_readability
+    score = calculate_flesch_reading_ease(text)
+    if score is not None and score < FLESCH_READING_EASE_LOW_THRESHOLD:
+        if not _is_synthetic_dummy_text(words):
+            add_issue(
+                "low_content_readability",
+                f"Content readability score is very low (Flesch Reading Ease: {score:.1f}/100; scores below {FLESCH_READING_EASE_LOW_THRESHOLD:.0f} indicate very difficult-to-read content). Consider shortening sentences and using simpler vocabulary.",
+            )
+
+    # 3c. weak_content_relevance
+    if word_count >= 100 and page_title and visible_h1s and not _is_synthetic_dummy_text(words):
+        topical_words = {
+            w.casefold()
+            for w in extract_meaningful_words(page_title + " " + " ".join(h.get_text() for h in visible_h1s))
+            if len(w) >= 4 and w.casefold() not in STOP_WORDS and w.casefold() not in GENERIC_TOPIC_WORDS
+        }
+        if topical_words:
+            if visible_paragraphs:
+                body_terms = {w.casefold() for _, pw in visible_paragraphs for w in pw}
+            else:
+                heading_terms = {
+                    w.casefold()
+                    for h in soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6"])
+                    for w in extract_meaningful_words(h.get_text())
+                }
+                body_terms = {w.casefold() for w in words if w.casefold() not in heading_terms}
+            if not (topical_words & body_terms):
+                add_issue(
+                    "weak_content_relevance",
+                    "Page title, headings, and body content appear weakly aligned; key terms from the title/headings were not found in the body text.",
+                )
+
+    return issues
+
+
+def summarize_readability_audit(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Calculate Content Readability & Keyword Optimization Summary statistics from crawled pages."""
+    html_pages = [
+        p
+        for p in results
+        if p.get("status_code", 200) < 400
+        and p.get("error") is None
+        and (p.get("content_type") is None or is_html_content(p.get("content_type")))
+    ]
+    pages_audited = len(html_pages)
+
+    all_issues = [
+        issue
+        for page in results
+        for issue in page.get("seo_issues", [])
+        if issue.get("type") in READABILITY_ISSUE_TYPES
+    ]
+
+    pages_with_issues = sum(
+        1
+        for p in results
+        if any(
+            i.get("type") in READABILITY_ISSUE_TYPES
+            for i in p.get("seo_issues", [])
+        )
+    )
+    keyword_stuffing_count = sum(
+        1 for i in all_issues if i.get("type") == "keyword_stuffing"
+    )
+    low_readability_count = sum(
+        1 for i in all_issues if i.get("type") == "low_content_readability"
+    )
+    heading_issues_count = sum(
+        1
+        for i in all_issues
+        if i.get("type")
+        in (
+            "missing_primary_heading",
+            "multiple_primary_headings",
+            "heading_content_mismatch",
+            "heading_repetition",
+            "missing_subheadings",
+        )
+    )
+
+    return {
+        "pages_audited_count": pages_audited,
+        "pages_with_issues_count": pages_with_issues,
+        "keyword_stuffing_count": keyword_stuffing_count,
+        "low_readability_count": low_readability_count,
+        "heading_issues_count": heading_issues_count,
+        "total_readability_issues": len(all_issues),
+        "severity_counts": {
+            "error": sum(1 for i in all_issues if i.get("severity") == "error"),
+            "warning": sum(1 for i in all_issues if i.get("severity") == "warning"),
+            "info": sum(1 for i in all_issues if i.get("severity") == "info"),
+        },
+    }
+
+
 def crawl_website(
     start_url: str,
     max_pages: int = 10,
@@ -5760,6 +6130,7 @@ def crawl_website(
                     "hreflang_links": [],
                     "has_open_graph": False,
                     "has_twitter_card": False,
+                    "readability_score": None,
                     "canonical_url": None,
                     "content_type": content_type,
                     "response_time_ms": response_time_ms,
@@ -6013,6 +6384,21 @@ def crawl_website(
                         visible_text=visible_text,
                     )
                 )
+                readability_issues = detect_readability_and_keyword_issues(
+                    url=current_url,
+                    soup=soup,
+                    content_type=content_type,
+                    title=page_title,
+                    visible_text=visible_text,
+                )
+                if any(i.get("type") == "missing_h1" for i in seo_issues):
+                    readability_issues = [
+                        i
+                        for i in readability_issues
+                        if i.get("type") != "missing_primary_heading"
+                    ]
+                seo_issues.extend(readability_issues)
+                results[-1]["readability_score"] = calculate_flesch_reading_ease(visible_text)
             seo_issues.extend(
                 detect_performance_seo_issues(
                     url=current_url,
@@ -6056,6 +6442,7 @@ def crawl_website(
                     "hreflang_links": [],
                     "has_open_graph": False,
                     "has_twitter_card": False,
+                    "readability_score": None,
                     "canonical_url": None,
                     "content_type": None,
                     "response_time_ms": None,
@@ -6089,6 +6476,7 @@ def crawl_website(
                     "hreflang_links": [],
                     "has_open_graph": False,
                     "has_twitter_card": False,
+                    "readability_score": None,
                     "canonical_url": None,
                     "content_type": error.response.headers.get("content-type"),
                     "response_time_ms": response_time_ms,

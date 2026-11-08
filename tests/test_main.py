@@ -21,6 +21,7 @@ SAMPLE_PAGE = {
     "hreflang_links": [],
     "has_open_graph": False,
     "has_twitter_card": False,
+    "readability_score": None,
     "is_https": True,
     "in_sitemap": True,
     "content_type": "text/html",
@@ -279,6 +280,22 @@ class FastAPIEndpointTests(unittest.TestCase):
                 "severity_counts": {
                     "error": 0,
                     "warning": 1,
+                    "info": 0,
+                },
+            },
+        )
+        self.assertEqual(
+            data["readability_summary"],
+            {
+                "pages_audited_count": 1,
+                "pages_with_issues_count": 0,
+                "keyword_stuffing_count": 0,
+                "low_readability_count": 0,
+                "heading_issues_count": 0,
+                "total_readability_issues": 0,
+                "severity_counts": {
+                    "error": 0,
+                    "warning": 0,
                     "info": 0,
                 },
             },
