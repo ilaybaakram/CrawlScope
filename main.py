@@ -24,16 +24,19 @@ allowed_origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
 ]
+allow_all_origins = False
 if cors_origins_env:
     for origin in cors_origins_env.split(","):
         cleaned = origin.strip()
-        if cleaned and cleaned not in allowed_origins:
+        if cleaned == "*":
+            allow_all_origins = True
+        elif cleaned and cleaned not in allowed_origins:
             allowed_origins.append(cleaned)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allowed_origins,
-    allow_credentials=True,
+    allow_origins=["*"] if allow_all_origins else allowed_origins,
+    allow_credentials=not allow_all_origins,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
@@ -73,6 +76,11 @@ def health_check():
     }
 
 
+@app.get("/api/health")
+def api_health_check():
+    return health_check()
+
+
 @app.post("/crawl")
 def run_crawl(request: CrawlRequest) -> dict[str, Any]:
     try:
@@ -103,6 +111,11 @@ def run_crawl(request: CrawlRequest) -> dict[str, Any]:
             status_code=500,
             detail=f"Crawl failed: {str(exc)}",
         ) from exc
+
+
+@app.post("/api/crawl")
+def run_api_crawl(request: CrawlRequest) -> dict[str, Any]:
+    return run_crawl(request)
 
 
 if __name__ == "__main__":

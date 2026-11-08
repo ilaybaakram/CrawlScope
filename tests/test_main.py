@@ -427,6 +427,25 @@ class FastAPIEndpointTests(unittest.TestCase):
                 )
                 self.assertEqual(response.status_code, 422)
 
+    def test_api_health_endpoint(self) -> None:
+        response = self.client.get("/api/health")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "healthy"})
+
+    def test_api_crawl_endpoint(self) -> None:
+        with patch("main.crawl_website", side_effect=fake_crawl_website):
+            response = self.client.post(
+                "/api/crawl",
+                json={
+                    "start_url": "https://example.com/",
+                    "max_pages": 5,
+                    "max_depth": 1,
+                    "delay_seconds": 1.0,
+                },
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["start_url"], "https://example.com/")
+
     def test_cors_allows_local_vite_origin(self) -> None:
         response = self.client.options(
             "/crawl",
