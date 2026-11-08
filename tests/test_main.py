@@ -17,6 +17,8 @@ SAMPLE_PAGE = {
     "outgoing_internal_links": 1,
     "outgoing_external_links": 0,
     "external_links": [],
+    "hreflang_count": 0,
+    "hreflang_links": [],
     "is_https": True,
     "in_sitemap": True,
     "content_type": "text/html",
@@ -240,6 +242,22 @@ class FastAPIEndpointTests(unittest.TestCase):
                 "verification_disabled": False,
                 "limit_reached": False,
                 "max_external_checks": 50,
+            },
+        )
+        self.assertEqual(
+            data["hreflang_summary"],
+            {
+                "pages_with_hreflang_count": 0,
+                "invalid_hreflang_count": 0,
+                "missing_return_links_count": 0,
+                "uncrawled_targets_count": 0,
+                "canonical_conflicts_count": 0,
+                "total_hreflang_issues": 0,
+                "severity_counts": {
+                    "error": 0,
+                    "warning": 0,
+                    "info": 0,
+                },
             },
         )
         self.assertEqual(data["pages"], [SAMPLE_PAGE])

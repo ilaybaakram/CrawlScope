@@ -3994,6 +3994,434 @@ class ExternalLinkAndSafetyAuditTests(unittest.TestCase):
         self.assertFalse(summary["verification_disabled"])
 
 
+class InternationalSeoAndHreflangAuditTests(unittest.TestCase):
+    def make_page_html(
+        self,
+        url: str,
+        canonical_url: str | None = None,
+        hreflang_tags: list[tuple[str, str]] | None = None,
+        body_links: list[str] | None = None,
+        extra_head: str = "",
+    ) -> str:
+        can_url = canonical_url if canonical_url is not None else url
+        hreflangs_html = ""
+        if hreflang_tags:
+            hreflangs_html = "\n".join(
+                f'<link rel="alternate" hreflang="{lang}" href="{href}">'
+                for lang, href in hreflang_tags
+            )
+        links_html = ""
+        if body_links:
+            links_html = "\n".join(f'<a href="{href}">{href}</a>' for href in body_links)
+
+        return (
+            "<!DOCTYPE html>"
+            '<html lang="en"><head><title>Hreflang Test</title>'
+            f'<link rel="canonical" href="{can_url}">'
+            f"{hreflangs_html}\n{extra_head}"
+            '<script type="application/ld+json">'
+            '{"@context":"https://schema.org","@type":"WebPage"}'
+            "</script></head>"
+            f"<body><main><h1>Hreflang Page</h1><p>{DEFAULT_BODY_WORDS}</p>{links_html}</main></body></html>"
+        )
+
+    def crawl_hreflang_site(
+        self,
+        pages_map: dict[str, tuple[str, dict[str, str]]],
+        start_url: str = START_URL,
+        max_pages: int = 5,
+        max_depth: int = 2,
+    ) -> list[dict[str, Any]]:
+        def fake_get(url, **_):
+            if url.endswith("/robots.txt"):
+                return make_response("GET", url, 200, ROBOTS_TXT)
+            if url.endswith("/sitemap.xml"):
+                return make_sitemap_response(url, list(pages_map.keys()))
+            if url in pages_map:
+                html, headers_dict = pages_map[url]
+                headers = {
+                    "content-type": "text/html; charset=utf-8",
+                    **DEFAULT_SECURITY_HEADERS,
+                    **headers_dict,
+                }
+                return make_response("GET", url, 200, text=html, extra_headers=headers)
+            return make_response("GET", url, 404, text="Not Found")
+
+        def fake_head(url, **_):
+            return make_response("HEAD", url, 200)
+
+        with patch("crawler.httpx.get", side_effect=fake_get), \
+             patch("crawler.httpx.head", side_effect=fake_head), \
+             patch.object(crawler, "EXTERNAL_LINK_VERIFICATION_ENABLED", False), \
+             patch("crawler.time.sleep"):
+            return crawler.crawl_website(
+                start_url, max_pages=max_pages, max_depth=max_depth
+            )
+
+    def test_is_valid_hreflang_rules(self):
+        # Valid language codes
+        self.assertTrue(crawler.is_valid_hreflang("en"))
+        self.assertTrue(crawler.is_valid_hreflang("es"))
+        self.assertTrue(crawler.is_valid_hreflang("zh"))
+        self.assertTrue(crawler.is_valid_hreflang("en-US"))
+        self.assertTrue(crawler.is_valid_hreflang("fr-CA"))
+        self.assertTrue(crawler.is_valid_hreflang("es-419"))
+        self.assertTrue(crawler.is_valid_hreflang("zh-Hans"))
+        self.assertTrue(crawler.is_valid_hreflang("zh-Hant-TW"))
+        self.assertTrue(crawler.is_valid_hreflang("x-default"))
+        self.assertTrue(crawler.is_valid_hreflang("X-DEFAULT"))
+        self.assertTrue(crawler.is_valid_hreflang("fil"))
+
+        # Invalid language codes
+        self.assertFalse(crawler.is_valid_hreflang("en_US"))  # underscore
+        self.assertFalse(crawler.is_valid_hreflang("us"))     # country alone
+        self.assertFalse(crawler.is_valid_hreflang("english"))
+        self.assertFalse(crawler.is_valid_hreflang("en-USA")) # 3-letter region
+        self.assertFalse(crawler.is_valid_hreflang("123"))
+        self.assertFalse(crawler.is_valid_hreflang(""))
+        self.assertFalse(crawler.is_valid_hreflang(None))
+        self.assertFalse(crawler.is_valid_hreflang("US-en"))
+
+    def test_extract_link_header_hreflang_support(self):
+        # Single Link header
+        headers_single = {
+            "link": '<https://example.com/fr>; rel="alternate"; hreflang="fr"'
+        }
+        res_single = crawler._extract_link_header_hreflangs(
+            headers_single, "https://example.com/"
+        )
+        self.assertEqual(len(res_single), 1)
+        self.assertEqual(res_single[0]["hreflang"], "fr")
+        self.assertEqual(res_single[0]["url"], "https://example.com/fr")
+        self.assertEqual(res_single[0]["source"], "header")
+
+        # Multiple comma-separated Link headers (quoted and unquoted)
+        headers_multiple = {
+            "link": (
+                '<https://example.com/es>; rel="alternate"; hreflang="es", '
+                '<https://example.com/de>; rel=alternate; hreflang=de, '
+                '<https://example.com/style.css>; rel="stylesheet"'
+            )
+        }
+        res_multiple = crawler._extract_link_header_hreflangs(
+            headers_multiple, "https://example.com/"
+        )
+        self.assertEqual(len(res_multiple), 2)
+        langs = [r["hreflang"] for r in res_multiple]
+        self.assertIn("es", langs)
+        self.assertIn("de", langs)
+
+    def test_invalid_hreflang_detected(self):
+        page_url = "https://example.com/en"
+        html = self.make_page_html(
+            page_url,
+            hreflang_tags=[
+                ("en", page_url),
+                ("en_US", "https://example.com/en-us"),
+                ("english", "https://example.com/en-full"),
+            ],
+        )
+        pages = self.crawl_hreflang_site({page_url: (html, {})}, start_url=page_url)
+        self.assertEqual(len(pages), 1)
+        issues = [i for i in pages[0]["seo_issues"] if i["type"] == "invalid_hreflang"]
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(issues[0]["severity"], "error")
+        self.assertEqual(sorted(issues[0]["invalid_hreflangs"]), ["en_US", "english"])
+
+    def test_duplicate_hreflang_language_detected(self):
+        page_url = "https://example.com/en"
+        html = self.make_page_html(
+            page_url,
+            hreflang_tags=[
+                ("en", page_url),
+                ("es", "https://example.com/es-1"),
+                ("es", "https://example.com/es-2"),
+            ],
+        )
+        pages = self.crawl_hreflang_site({page_url: (html, {})}, start_url=page_url)
+        issues = [
+            i for i in pages[0]["seo_issues"] if i["type"] == "duplicate_hreflang_language"
+        ]
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(issues[0]["severity"], "warning")
+        self.assertEqual(issues[0]["duplicate_languages"], ["es"])
+
+    def test_hreflang_missing_self_reference_detected(self):
+        page_url = "https://example.com/en"
+        html = self.make_page_html(
+            page_url,
+            hreflang_tags=[
+                ("fr", "https://example.com/fr"),
+                ("es", "https://example.com/es"),
+            ],
+        )
+        pages = self.crawl_hreflang_site({page_url: (html, {})}, start_url=page_url)
+        issues = [
+            i for i in pages[0]["seo_issues"] if i["type"] == "hreflang_missing_self_reference"
+        ]
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(issues[0]["severity"], "warning")
+
+    def test_hreflang_missing_x_default_detected(self):
+        page_url = "https://example.com/en"
+        # 2 distinct language alternates but no x-default
+        html = self.make_page_html(
+            page_url,
+            hreflang_tags=[
+                ("en", page_url),
+                ("fr", "https://example.com/fr"),
+            ],
+        )
+        pages = self.crawl_hreflang_site({page_url: (html, {})}, start_url=page_url)
+        issues = [
+            i for i in pages[0]["seo_issues"] if i["type"] == "hreflang_missing_x_default"
+        ]
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(issues[0]["severity"], "info")
+
+    def test_hreflang_http_url_detected_on_https_page(self):
+        page_url = "https://example.com/en"
+        html = self.make_page_html(
+            page_url,
+            hreflang_tags=[
+                ("en", page_url),
+                ("es", "http://example.com/es"),
+            ],
+        )
+        pages = self.crawl_hreflang_site({page_url: (html, {})}, start_url=page_url)
+        issues = [
+            i for i in pages[0]["seo_issues"] if i["type"] == "hreflang_http_url"
+        ]
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(issues[0]["severity"], "warning")
+        self.assertEqual(issues[0]["insecure_urls"], ["http://example.com/es"])
+
+    def test_hreflang_canonical_conflict_detected(self):
+        # Page A has canonical pointing to Page B, but declares hreflang tags
+        page_url = "https://example.com/en?utm=test"
+        canonical_url = "https://example.com/en"
+        html = self.make_page_html(
+            page_url,
+            canonical_url=canonical_url,
+            hreflang_tags=[
+                ("en", page_url),
+                ("fr", "https://example.com/fr"),
+            ],
+        )
+        pages = self.crawl_hreflang_site({page_url: (html, {})}, start_url=page_url)
+        issues = [
+            i for i in pages[0]["seo_issues"] if i["type"] == "hreflang_canonical_conflict"
+        ]
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(issues[0]["severity"], "error")
+        self.assertEqual(issues[0]["canonical_url"], canonical_url)
+
+    def test_reciprocal_return_links_and_missing_return_link(self):
+        url_en = "https://example.com/en"
+        url_fr = "https://example.com/fr"
+
+        # /en declares return to /fr; /fr DOES NOT declare return to /en
+        html_en = self.make_page_html(
+            url_en,
+            hreflang_tags=[
+                ("en", url_en),
+                ("fr", url_fr),
+                ("x-default", url_en),
+            ],
+            body_links=[url_fr],
+        )
+        html_fr_no_return = self.make_page_html(
+            url_fr,
+            hreflang_tags=[
+                ("fr", url_fr),
+            ],
+        )
+
+        site_map = {
+            url_en: (html_en, {}),
+            url_fr: (html_fr_no_return, {}),
+        }
+        pages = self.crawl_hreflang_site(site_map, start_url=url_en, max_pages=2, max_depth=1)
+        by_url = {p["url"]: p for p in pages}
+
+        en_missing_return = [
+            i for i in by_url[url_en]["seo_issues"] if i["type"] == "hreflang_missing_return_link"
+        ]
+        self.assertEqual(len(en_missing_return), 1)
+        self.assertEqual(en_missing_return[0]["severity"], "warning")
+        self.assertEqual(en_missing_return[0]["missing_return_urls"], [url_fr])
+
+        # Now test reciprocal when /fr links back to /en
+        html_fr_reciprocal = self.make_page_html(
+            url_fr,
+            hreflang_tags=[
+                ("fr", url_fr),
+                ("en", url_en),
+                ("x-default", url_en),
+            ],
+        )
+        site_map_reciprocal = {
+            url_en: (html_en, {}),
+            url_fr: (html_fr_reciprocal, {}),
+        }
+        pages_reciprocal = self.crawl_hreflang_site(
+            site_map_reciprocal, start_url=url_en, max_pages=2, max_depth=1
+        )
+        by_url_rec = {p["url"]: p for p in pages_reciprocal}
+        en_clean = [
+            i for i in by_url_rec[url_en]["seo_issues"] if i["type"] == "hreflang_missing_return_link"
+        ]
+        fr_clean = [
+            i for i in by_url_rec[url_fr]["seo_issues"] if i["type"] == "hreflang_missing_return_link"
+        ]
+        self.assertEqual(en_clean, [])
+        self.assertEqual(fr_clean, [])
+
+    def test_hreflang_target_not_crawled_detected(self):
+        url_en = "https://example.com/en"
+        url_de_uncrawled = "https://example.com/de"
+
+        html_en = self.make_page_html(
+            url_en,
+            hreflang_tags=[
+                ("en", url_en),
+                ("de", url_de_uncrawled),
+                ("x-default", url_en),
+            ],
+        )
+        pages = self.crawl_hreflang_site({url_en: (html_en, {})}, start_url=url_en, max_pages=1)
+        uncrawled_issues = [
+            i for i in pages[0]["seo_issues"] if i["type"] == "hreflang_target_not_crawled"
+        ]
+        self.assertEqual(len(uncrawled_issues), 1)
+        self.assertEqual(uncrawled_issues[0]["severity"], "info")
+        self.assertEqual(uncrawled_issues[0]["uncrawled_urls"], [url_de_uncrawled])
+
+    def test_hreflang_noncanonical_target_detected(self):
+        url_en = "https://example.com/en"
+        url_es_target = "https://example.com/es"
+        url_es_canonical = "https://example.com/es-canonical"
+
+        html_en = self.make_page_html(
+            url_en,
+            hreflang_tags=[
+                ("en", url_en),
+                ("es", url_es_target),
+                ("x-default", url_en),
+            ],
+            body_links=[url_es_target],
+        )
+        html_es = self.make_page_html(
+            url_es_target,
+            canonical_url=url_es_canonical,
+            hreflang_tags=[
+                ("es", url_es_target),
+                ("en", url_en),
+            ],
+        )
+        site_map = {
+            url_en: (html_en, {}),
+            url_es_target: (html_es, {}),
+        }
+        pages = self.crawl_hreflang_site(site_map, start_url=url_en, max_pages=2, max_depth=1)
+        by_url = {p["url"]: p for p in pages}
+        noncanonical_issues = [
+            i for i in by_url[url_en]["seo_issues"] if i["type"] == "hreflang_noncanonical_target"
+        ]
+        self.assertEqual(len(noncanonical_issues), 1)
+        self.assertEqual(noncanonical_issues[0]["severity"], "warning")
+        self.assertEqual(
+            noncanonical_issues[0]["noncanonical_targets"],
+            [{"target_url": url_es_target, "canonical_url": url_es_canonical}],
+        )
+
+    def test_missing_hreflang_on_multilingual_site_detected(self):
+        url_en = "https://example.com/en"
+        url_contact = "https://example.com/contact"
+
+        # /en has hreflang; /contact is crawled but has 0 hreflang
+        html_en = self.make_page_html(
+            url_en,
+            hreflang_tags=[("en", url_en), ("x-default", url_en)],
+            body_links=[url_contact],
+        )
+        html_contact = (
+            "<!DOCTYPE html>"
+            '<html lang="en"><head><title>Contact</title>'
+            f'<link rel="canonical" href="{url_contact}">'
+            '<script type="application/ld+json">{"@context":"https://schema.org","@type":"WebPage"}</script>'
+            f"</head><body><main><h1>Contact</h1><p>{DEFAULT_BODY_WORDS}</p></main></body></html>"
+        )
+        site_map = {
+            url_en: (html_en, {}),
+            url_contact: (html_contact, {}),
+        }
+        pages = self.crawl_hreflang_site(site_map, start_url=url_en, max_pages=2, max_depth=1)
+        by_url = {p["url"]: p for p in pages}
+        contact_missing = [
+            i for i in by_url[url_contact]["seo_issues"] if i["type"] == "missing_hreflang"
+        ]
+        self.assertEqual(len(contact_missing), 1)
+        self.assertEqual(contact_missing[0]["severity"], "info")
+
+    def test_monolingual_site_does_not_flag_missing_hreflang(self):
+        url_home = "https://example.com/"
+        html = (
+            "<!DOCTYPE html>"
+            '<html lang="en"><head><title>Home</title>'
+            f'<link rel="canonical" href="{url_home}">'
+            '<script type="application/ld+json">{"@context":"https://schema.org","@type":"WebPage"}</script>'
+            f"</head><body><main><h1>Home</h1><p>{DEFAULT_BODY_WORDS}</p></main></body></html>"
+        )
+        pages = self.crawl_hreflang_site({url_home: (html, {})}, start_url=url_home, max_pages=1)
+        missing_issues = [
+            i for i in pages[0]["seo_issues"] if i["type"] == "missing_hreflang"
+        ]
+        self.assertEqual(missing_issues, [])
+
+    def test_summarize_hreflang_audit(self):
+        sample_results = [
+            {
+                "url": "https://example.com/en",
+                "hreflang_count": 2,
+                "seo_issues": [
+                    {
+                        "type": "invalid_hreflang",
+                        "severity": "error",
+                    },
+                    {
+                        "type": "hreflang_missing_return_link",
+                        "severity": "warning",
+                    },
+                ],
+            },
+            {
+                "url": "https://example.com/fr",
+                "hreflang_count": 0,
+                "seo_issues": [
+                    {
+                        "type": "hreflang_target_not_crawled",
+                        "severity": "info",
+                    },
+                    {
+                        "type": "hreflang_canonical_conflict",
+                        "severity": "error",
+                    },
+                ],
+            },
+        ]
+        summary = crawler.summarize_hreflang_audit(sample_results)
+        self.assertEqual(summary["pages_with_hreflang_count"], 1)
+        self.assertEqual(summary["invalid_hreflang_count"], 1)
+        self.assertEqual(summary["missing_return_links_count"], 1)
+        self.assertEqual(summary["uncrawled_targets_count"], 1)
+        self.assertEqual(summary["canonical_conflicts_count"], 1)
+        self.assertEqual(summary["total_hreflang_issues"], 4)
+        self.assertEqual(summary["severity_counts"]["error"], 2)
+        self.assertEqual(summary["severity_counts"]["warning"], 1)
+        self.assertEqual(summary["severity_counts"]["info"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -15,6 +15,7 @@ PAGE_FIELDS = [
     "incoming_internal_links",
     "outgoing_internal_links",
     "outgoing_external_links",
+    "hreflang_count",
     "content_type",
     "response_time_ms",
     "page_size_bytes",

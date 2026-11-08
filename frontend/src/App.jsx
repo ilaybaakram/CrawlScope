@@ -15,6 +15,7 @@ const PAGE_FIELDS = [
   "incoming_internal_links",
   "outgoing_internal_links",
   "outgoing_external_links",
+  "hreflang_count",
   "content_type",
   "response_time_ms",
   "page_size_bytes",
@@ -49,6 +50,19 @@ const EXTERNAL_LINK_ISSUE_TYPES = new Set([
   "external_link_to_http",
   "nofollow_external_link",
   "excessive_external_links",
+]);
+
+const HREFLANG_ISSUE_TYPES = new Set([
+  "missing_hreflang",
+  "invalid_hreflang",
+  "hreflang_missing_return_link",
+  "hreflang_target_not_crawled",
+  "hreflang_noncanonical_target",
+  "hreflang_missing_self_reference",
+  "hreflang_missing_x_default",
+  "hreflang_canonical_conflict",
+  "duplicate_hreflang_language",
+  "hreflang_http_url",
 ]);
 
 const LINK_FIELDS = ["url", "found_on", "status_code", "result", "error"];
@@ -277,6 +291,37 @@ function App() {
     verification_disabled: false,
     limit_reached: false,
     max_external_checks: 50,
+  };
+  const hreflangSummary = crawlData?.hreflang_summary || {
+    pages_with_hreflang_count: pages.filter(
+      (p) => (p.hreflang_count || 0) > 0
+    ).length,
+    invalid_hreflang_count: seoIssues.filter(
+      (i) => i.type === "invalid_hreflang"
+    ).length,
+    missing_return_links_count: seoIssues.filter(
+      (i) => i.type === "hreflang_missing_return_link"
+    ).length,
+    uncrawled_targets_count: seoIssues.filter(
+      (i) => i.type === "hreflang_target_not_crawled"
+    ).length,
+    canonical_conflicts_count: seoIssues.filter(
+      (i) => i.type === "hreflang_canonical_conflict"
+    ).length,
+    total_hreflang_issues: seoIssues.filter((i) =>
+      HREFLANG_ISSUE_TYPES.has(i.type)
+    ).length,
+    severity_counts: {
+      error: seoIssues.filter(
+        (i) => HREFLANG_ISSUE_TYPES.has(i.type) && i.severity === "error"
+      ).length,
+      warning: seoIssues.filter(
+        (i) => HREFLANG_ISSUE_TYPES.has(i.type) && i.severity === "warning"
+      ).length,
+      info: seoIssues.filter(
+        (i) => HREFLANG_ISSUE_TYPES.has(i.type) && i.severity === "info"
+      ).length,
+    },
   };
   const canDownload = Boolean(crawlData) && !isLoading;
 
@@ -556,6 +601,50 @@ function App() {
 
       <section className="card">
         <div className="section-header">
+          <h2>International SEO &amp; Hreflang Summary</h2>
+          <div className="seo-metrics">
+            <span className="metric-badge">
+              Pages with Hreflang:{" "}
+              <strong>
+                {crawlData ? hreflangSummary.pages_with_hreflang_count : 0}
+              </strong>
+            </span>
+            <span className="metric-badge">
+              Invalid Hreflang:{" "}
+              <strong>
+                {crawlData ? hreflangSummary.invalid_hreflang_count : 0}
+              </strong>
+            </span>
+            <span className="metric-badge">
+              Missing Reciprocal Links:{" "}
+              <strong>
+                {crawlData ? hreflangSummary.missing_return_links_count : 0}
+              </strong>
+            </span>
+            <span className="metric-badge">
+              Uncrawled Targets:{" "}
+              <strong>
+                {crawlData ? hreflangSummary.uncrawled_targets_count : 0}
+              </strong>
+            </span>
+            <span className="metric-badge">
+              Canonical Conflicts:{" "}
+              <strong>
+                {crawlData ? hreflangSummary.canonical_conflicts_count : 0}
+              </strong>
+            </span>
+            <span className="metric-badge">
+              Total Hreflang Findings:{" "}
+              <strong>
+                {crawlData ? hreflangSummary.total_hreflang_issues : 0}
+              </strong>
+            </span>
+          </div>
+        </div>
+      </section>
+
+      <section className="card">
+        <div className="section-header">
           <h2>Download Crawl Results</h2>
           {!crawlData && (
             <span className="section-hint">
@@ -622,6 +711,7 @@ function App() {
                   <th>Incoming Internal</th>
                   <th>Outgoing Internal</th>
                   <th>Outgoing External</th>
+                  <th>Hreflang</th>
                   <th>HTTPS</th>
                   <th>Security</th>
                   <th>In Sitemap</th>
@@ -661,6 +751,15 @@ function App() {
                     <td>{page.incoming_internal_links ?? 0}</td>
                     <td>{page.outgoing_internal_links ?? 0}</td>
                     <td>{page.outgoing_external_links ?? 0}</td>
+                    <td>
+                      {page.hreflang_count ? (
+                        <span className="status-pill status-ok">
+                          {page.hreflang_count} tag(s)
+                        </span>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
                     <td>
                       <span
                         className={
@@ -761,6 +860,7 @@ function App() {
                   <th>Incoming Internal</th>
                   <th>Outgoing Internal</th>
                   <th>External URLs</th>
+                  <th>Hreflang / Alternate URL</th>
                   <th>Missing Header</th>
                   <th>Insecure / Form URL</th>
                   <th>Sitemap URL</th>
@@ -829,6 +929,32 @@ function App() {
                       {Array.isArray(issue.external_urls) &&
                       issue.external_urls.length > 0 ? (
                         <code>{issue.external_urls.join(", ")}</code>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
+                    <td className="url-cell">
+                      {issue.hreflang_url ? (
+                        <code>{issue.hreflang_url}</code>
+                      ) : Array.isArray(issue.missing_return_urls) &&
+                        issue.missing_return_urls.length > 0 ? (
+                        <code>{issue.missing_return_urls.join(", ")}</code>
+                      ) : Array.isArray(issue.uncrawled_urls) &&
+                        issue.uncrawled_urls.length > 0 ? (
+                        <code>{issue.uncrawled_urls.join(", ")}</code>
+                      ) : Array.isArray(issue.invalid_hreflangs) &&
+                        issue.invalid_hreflangs.length > 0 ? (
+                        <code>{issue.invalid_hreflangs.join(", ")}</code>
+                      ) : Array.isArray(issue.duplicate_languages) &&
+                        issue.duplicate_languages.length > 0 ? (
+                        <code>{issue.duplicate_languages.join(", ")}</code>
+                      ) : Array.isArray(issue.noncanonical_targets) &&
+                        issue.noncanonical_targets.length > 0 ? (
+                        <code>
+                          {issue.noncanonical_targets
+                            .map((nt) => `${nt.target_url} -> ${nt.canonical_url}`)
+                            .join(", ")}
+                        </code>
                       ) : (
                         "—"
                       )}

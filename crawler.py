@@ -1,5 +1,6 @@
 import ipaddress
 import json
+import re
 import socket
 import ssl
 import time
@@ -4673,6 +4674,531 @@ def summarize_external_links(
     }
 
 
+# ---------------------------------------------------------------------------
+# International SEO & Hreflang Audit
+# ---------------------------------------------------------------------------
+
+HREFLANG_ISSUE_TYPES = {
+    "missing_hreflang",
+    "invalid_hreflang",
+    "hreflang_missing_return_link",
+    "hreflang_target_not_crawled",
+    "hreflang_noncanonical_target",
+    "hreflang_missing_self_reference",
+    "hreflang_missing_x_default",
+    "hreflang_canonical_conflict",
+    "duplicate_hreflang_language",
+    "hreflang_http_url",
+}
+
+# Standard 2-letter ISO 639-1 language codes
+_ISO_639_1_CODES = {
+    "aa", "ab", "ae", "af", "ak", "am", "an", "ar", "as", "av", "ay", "az",
+    "ba", "be", "bg", "bh", "bi", "bm", "bn", "bo", "br", "bs", "ca", "ce",
+    "ch", "co", "cr", "cs", "cu", "cv", "cy", "da", "de", "dv", "dz", "ee",
+    "el", "en", "eo", "es", "et", "eu", "fa", "ff", "fi", "fj", "fo", "fr",
+    "fy", "ga", "gd", "gl", "gn", "gu", "gv", "ha", "he", "hi", "ho", "hr",
+    "ht", "hu", "hy", "hz", "ia", "id", "ie", "ig", "ii", "ik", "io", "is",
+    "it", "iu", "ja", "jv", "ka", "kg", "ki", "kj", "kk", "kl", "km", "kn",
+    "ko", "kr", "ks", "ku", "kv", "kw", "ky", "la", "lb", "lg", "li", "ln",
+    "lo", "lt", "lu", "lv", "mg", "mh", "mi", "mk", "ml", "mn", "mr", "ms",
+    "mt", "my", "na", "nb", "nd", "ne", "ng", "nl", "nn", "no", "nr", "nv",
+    "ny", "oc", "oj", "om", "or", "os", "pa", "pi", "pl", "ps", "pt", "qu",
+    "rm", "rn", "ro", "ru", "rw", "sa", "sc", "sd", "se", "sg", "si", "sk",
+    "sl", "sm", "sn", "so", "sq", "sr", "ss", "st", "su", "sv", "sw", "ta",
+    "te", "tg", "th", "ti", "tk", "tl", "tn", "to", "tr", "ts", "tt", "tw",
+    "ty", "ug", "uk", "ur", "uz", "ve", "vi", "vo", "wa", "wo", "xh", "yi",
+    "yo", "za", "zh", "zu",
+}
+
+# Recognized 3-letter ISO 639-2/3 language codes frequently used in web hreflang
+_ISO_639_2_3_CODES = {
+    "ast", "fil", "gsw", "haw", "kok", "mai", "mni", "nso", "syr", "yue",
+}
+
+
+def is_valid_hreflang(tag: str) -> bool:
+    """Validate a BCP 47 language/region tag according to hreflang specifications.
+
+    Accepts 'x-default' (case-insensitive) or valid language tags conforming to
+    language[-script][-region], such as 'en', 'en-US', 'es-419', 'zh-Hans',
+    or 'zh-Hant-TW'. Rejects underscores (e.g. 'en_US'), country-only codes ('us'),
+    names ('english'), numbers, or malformed subtags.
+    """
+    if not isinstance(tag, str):
+        return False
+    cleaned = tag.strip().lower()
+    if not cleaned:
+        return False
+    if cleaned == "x-default":
+        return True
+    if "_" in tag:
+        return False
+
+    parts = cleaned.split("-")
+    if not (1 <= len(parts) <= 3):
+        return False
+
+    lang = parts[0]
+    if lang not in _ISO_639_1_CODES and lang not in _ISO_639_2_3_CODES:
+        return False
+
+    if len(parts) == 1:
+        return True
+
+    if len(parts) == 2:
+        subtag = parts[1]
+        is_script = len(subtag) == 4 and subtag.isalpha()
+        is_region = (len(subtag) == 2 and subtag.isalpha()) or (
+            len(subtag) == 3 and subtag.isdigit()
+        )
+        return is_script or is_region
+
+    if len(parts) == 3:
+        script, region = parts[1], parts[2]
+        is_script = len(script) == 4 and script.isalpha()
+        is_region = (len(region) == 2 and region.isalpha()) or (
+            len(region) == 3 and region.isdigit()
+        )
+        return is_script and is_region
+
+    return False
+
+
+def _extract_link_header_hreflangs(
+    headers: Any, base_url: str
+) -> list[dict[str, Any]]:
+    """Parse hreflang alternate links from HTTP Link headers."""
+    raw_header_values: list[str] = []
+    if hasattr(headers, "get_list"):
+        raw_header_values = headers.get_list("link")
+    elif hasattr(headers, "get"):
+        val = headers.get("link")
+        if val:
+            raw_header_values = [val]
+
+    results: list[dict[str, Any]] = []
+    for header_val in raw_header_values:
+        entries = re.findall(r'<([^>]+)>(.*?)(?:,|$)', header_val)
+        for raw_url, params_str in entries:
+            param_matches = re.findall(
+                r'([a-zA-Z_-]+)\s*=\s*(?:"([^"]*)"|([^\s;,]+))', params_str
+            )
+            param_dict = {}
+            for k, q_val, u_val in param_matches:
+                param_dict[k.lower()] = q_val if q_val else u_val
+
+            rel = param_dict.get("rel", "")
+            hreflang = param_dict.get("hreflang", "")
+            if "alternate" in rel.lower().split() and hreflang:
+                abs_url = urljoin(base_url, raw_url.strip())
+                clean_url, _ = urldefrag(abs_url)
+                norm_url = _normalize_internal_url(clean_url)
+                results.append(
+                    {
+                        "hreflang": hreflang.strip(),
+                        "normalized_hreflang": hreflang.strip().lower(),
+                        "url": clean_url,
+                        "normalized_url": norm_url,
+                        "source": "header",
+                    }
+                )
+    return results
+
+
+def _extract_hreflang_links(
+    page_url: str,
+    soup: BeautifulSoup,
+    response_headers: Any = None,
+) -> list[dict[str, Any]]:
+    """Extract hreflang alternate annotations from HTML <link> tags and HTTP Link headers."""
+    links: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+
+    for tag in soup.find_all("link"):
+        rel = tag.get("rel")
+        if isinstance(rel, list):
+            rel_tokens = {r.strip().lower() for r in rel if isinstance(r, str)}
+        elif isinstance(rel, str):
+            rel_tokens = {r.strip().lower() for r in rel.split()}
+        else:
+            continue
+
+        if "alternate" not in rel_tokens:
+            continue
+
+        raw_lang = tag.get("hreflang")
+        raw_href = tag.get("href")
+        if not raw_lang or not isinstance(raw_lang, str) or not raw_lang.strip():
+            continue
+        if not raw_href or not isinstance(raw_href, str) or not raw_href.strip():
+            continue
+
+        cleaned_lang = raw_lang.strip()
+        abs_url = urljoin(page_url, raw_href.strip())
+        clean_url, _ = urldefrag(abs_url)
+        norm_url = _normalize_internal_url(clean_url)
+        key = (cleaned_lang.lower(), norm_url)
+        if key not in seen:
+            seen.add(key)
+            links.append(
+                {
+                    "hreflang": cleaned_lang,
+                    "normalized_hreflang": cleaned_lang.lower(),
+                    "url": clean_url,
+                    "normalized_url": norm_url,
+                    "source": "html",
+                }
+            )
+
+    if response_headers:
+        header_links = _extract_link_header_hreflangs(response_headers, page_url)
+        for item in header_links:
+            key = (item["normalized_hreflang"], item["normalized_url"])
+            if key not in seen:
+                seen.add(key)
+                links.append(item)
+
+    return links
+
+
+def detect_page_hreflang_issues(
+    url: str,
+    hreflang_links: list[dict[str, Any]],
+    canonical_url: str | None = None,
+    is_https: bool = False,
+) -> list[dict[str, Any]]:
+    """Run per-page static checks on hreflang annotations."""
+    if not hreflang_links:
+        return []
+
+    issues: list[dict[str, Any]] = []
+    norm_page_url = _normalize_internal_url(url)
+    norm_canonical_url = (
+        _normalize_internal_url(canonical_url) if canonical_url else None
+    )
+
+    # 1. invalid_hreflang
+    invalid_tags = [
+        link["hreflang"]
+        for link in hreflang_links
+        if not is_valid_hreflang(link["hreflang"])
+    ]
+    if invalid_tags:
+        issues.append(
+            {
+                "type": "invalid_hreflang",
+                "severity": "error",
+                "message": (
+                    f"Page declares invalid hreflang code(s): {', '.join(invalid_tags)}; "
+                    f"use valid ISO 639-1 language code and optional ISO 3166-1 alpha-2 region (e.g. 'en-US' or 'x-default')."
+                ),
+                "url": url,
+                "invalid_hreflangs": invalid_tags,
+            }
+        )
+
+    # 2. duplicate_hreflang_language
+    lang_counts: dict[str, list[str]] = {}
+    for link in hreflang_links:
+        lang_counts.setdefault(link["normalized_hreflang"], []).append(link["url"])
+
+    duplicate_langs = [
+        lang for lang, urls in lang_counts.items() if len(urls) > 1
+    ]
+    if duplicate_langs:
+        issues.append(
+            {
+                "type": "duplicate_hreflang_language",
+                "severity": "warning",
+                "message": (
+                    f"Page declares duplicate alternate URLs for the same language/region: "
+                    f"{', '.join(duplicate_langs)}; each language or regional variant must have only one target URL."
+                ),
+                "url": url,
+                "duplicate_languages": duplicate_langs,
+            }
+        )
+
+    # 3. hreflang_missing_self_reference
+    has_self_ref = any(
+        link["normalized_url"] == norm_page_url
+        or (norm_canonical_url and link["normalized_url"] == norm_canonical_url)
+        for link in hreflang_links
+    )
+    if not has_self_ref:
+        issues.append(
+            {
+                "type": "hreflang_missing_self_reference",
+                "severity": "warning",
+                "message": (
+                    "Page declares hreflang annotations but lacks a self-referencing hreflang tag; "
+                    "each language version must list itself as well as all other language versions."
+                ),
+                "url": url,
+            }
+        )
+
+    # 4. hreflang_missing_x_default
+    distinct_languages = {
+        link["normalized_hreflang"]
+        for link in hreflang_links
+        if link["normalized_hreflang"] != "x-default"
+    }
+    has_x_default = any(
+        link["normalized_hreflang"] == "x-default" for link in hreflang_links
+    )
+    if len(distinct_languages) >= 2 and not has_x_default:
+        issues.append(
+            {
+                "type": "hreflang_missing_x_default",
+                "severity": "info",
+                "message": (
+                    "Multilingual hreflang set lacks an 'x-default' annotation; add an x-default tag "
+                    "to target international visitors whose language is not explicitly listed."
+                ),
+                "url": url,
+            }
+        )
+
+    # 5. hreflang_http_url
+    if is_https:
+        http_targets = [
+            link["url"]
+            for link in hreflang_links
+            if link["url"].lower().startswith("http://")
+        ]
+        if http_targets:
+            issues.append(
+                {
+                    "type": "hreflang_http_url",
+                    "severity": "warning",
+                    "message": (
+                        f"Page is served over HTTPS but references insecure HTTP hreflang target(s): "
+                        f"{', '.join(http_targets[:5])}; link to HTTPS version."
+                    ),
+                    "url": url,
+                    "insecure_urls": http_targets,
+                }
+            )
+
+    # 6. hreflang_canonical_conflict (per-page)
+    if norm_canonical_url and norm_canonical_url != norm_page_url:
+        issues.append(
+            {
+                "type": "hreflang_canonical_conflict",
+                "severity": "error",
+                "message": (
+                    f"Page declares hreflang annotations but its canonical URL points to '{canonical_url}'; "
+                    f"Google requires hreflang annotations to be declared on canonical pages only."
+                ),
+                "url": url,
+                "canonical_url": canonical_url,
+                "hreflang_url": url,
+            }
+        )
+    elif norm_canonical_url:
+        self_links = [
+            link
+            for link in hreflang_links
+            if link["normalized_url"] == norm_page_url
+            or link["normalized_url"] == norm_canonical_url
+        ]
+        for sl in self_links:
+            if sl["normalized_url"] != norm_canonical_url:
+                issues.append(
+                    {
+                        "type": "hreflang_canonical_conflict",
+                        "severity": "error",
+                        "message": (
+                            f"Self-referencing hreflang URL '{sl['url']}' conflicts with the declared canonical URL "
+                            f"'{canonical_url}'; ensure self-referencing hreflang matches canonical URL exactly."
+                        ),
+                        "url": url,
+                        "canonical_url": canonical_url,
+                        "hreflang_url": sl["url"],
+                    }
+                )
+                break
+
+    return issues
+
+
+def detect_cross_page_hreflang_issues(results: list[dict[str, Any]]) -> None:
+    """Analyze reciprocal hreflang relationships and missing hreflang across crawled pages."""
+    crawled_by_norm: dict[str, dict[str, Any]] = {}
+    for page in results:
+        if page.get("url"):
+            norm = _normalize_internal_url(page["url"])
+            crawled_by_norm[norm] = page
+
+    # Check if site appears to be multilingual
+    has_hreflang_pages = any((p.get("hreflang_count") or 0) > 0 for p in results)
+    has_multilingual_paths = any(
+        bool(re.search(r"^/[a-z]{2}(-[a-z]{2})?(/|$)", urlparse(p["url"]).path.lower()))
+        for p in results
+        if p.get("url")
+    )
+    is_multilingual_site = has_hreflang_pages or has_multilingual_paths
+
+    # 1. missing_hreflang
+    if is_multilingual_site:
+        for page in results:
+            if page.get("error") is not None:
+                continue
+            if not is_html_content(page.get("content_type")):
+                continue
+            if (page.get("hreflang_count") or 0) == 0:
+                page_path = urlparse(page["url"]).path.lower()
+                has_lang_path = bool(re.search(r"^/[a-z]{2}(-[a-z]{2})?(/|$)", page_path))
+                if has_hreflang_pages or has_lang_path:
+                    seo_issues = page.setdefault("seo_issues", [])
+                    if not any(i.get("type") == "missing_hreflang" for i in seo_issues):
+                        seo_issues.append(
+                            {
+                                "type": "missing_hreflang",
+                                "severity": "info",
+                                "message": (
+                                    "Page appears to be part of a multilingual site but lacks hreflang annotations; "
+                                    "add <link rel=\"alternate\" hreflang=\"...\" href=\"...\"> tags to help search engines serve the correct language version."
+                                ),
+                                "url": page["url"],
+                            }
+                        )
+
+    # 2. Cross-page reciprocal, uncrawled, and non-canonical target checks
+    for page in results:
+        hreflang_links = page.get("hreflang_links") or []
+        if not hreflang_links:
+            continue
+
+        page_norm = _normalize_internal_url(page["url"])
+        page_canonical = page.get("canonical_url")
+        page_canonical_norm = (
+            _normalize_internal_url(page_canonical) if page_canonical else page_norm
+        )
+
+        missing_returns: list[str] = []
+        uncrawled_targets: list[str] = []
+        noncanonical_targets: list[dict[str, str]] = []
+
+        for link in hreflang_links:
+            target_norm = link["normalized_url"]
+            if target_norm == page_norm or target_norm == page_canonical_norm:
+                continue
+
+            target_page = crawled_by_norm.get(target_norm)
+            if target_page is None:
+                uncrawled_targets.append(link["url"])
+                continue
+
+            target_canonical = target_page.get("canonical_url")
+            if target_canonical:
+                target_canonical_norm = _normalize_internal_url(target_canonical)
+                if target_canonical_norm != target_norm:
+                    noncanonical_targets.append(
+                        {
+                            "target_url": link["url"],
+                            "canonical_url": target_canonical,
+                        }
+                    )
+
+            target_hreflang_links = target_page.get("hreflang_links") or []
+            has_return_link = any(
+                tl["normalized_url"] == page_norm
+                or (page_canonical_norm and tl["normalized_url"] == page_canonical_norm)
+                for tl in target_hreflang_links
+            )
+            if not has_return_link:
+                missing_returns.append(link["url"])
+
+        seo_issues = page.setdefault("seo_issues", [])
+        existing_types = {i.get("type") for i in seo_issues}
+
+        if missing_returns and "hreflang_missing_return_link" not in existing_types:
+            seo_issues.append(
+                {
+                    "type": "hreflang_missing_return_link",
+                    "severity": "warning",
+                    "message": (
+                        f"Alternate language page(s) do not reciprocally link back to this page: "
+                        f"{', '.join(missing_returns[:5])}; Google requires reciprocal hreflang annotations."
+                    ),
+                    "url": page["url"],
+                    "missing_return_urls": missing_returns,
+                }
+            )
+
+        if uncrawled_targets and "hreflang_target_not_crawled" not in existing_types:
+            seo_issues.append(
+                {
+                    "type": "hreflang_target_not_crawled",
+                    "severity": "info",
+                    "message": (
+                        f"Hreflang target(s) were not discovered or crawled during this crawl: "
+                        f"{', '.join(uncrawled_targets[:5])}; verify that these targets are indexable and reachable."
+                    ),
+                    "url": page["url"],
+                    "uncrawled_urls": uncrawled_targets,
+                }
+            )
+
+        if noncanonical_targets and "hreflang_noncanonical_target" not in existing_types:
+            preview = ", ".join(
+                f"{nt['target_url']} -> {nt['canonical_url']}"
+                for nt in noncanonical_targets[:3]
+            )
+            seo_issues.append(
+                {
+                    "type": "hreflang_noncanonical_target",
+                    "severity": "warning",
+                    "message": (
+                        f"Hreflang target points to a non-canonical URL ({preview}); "
+                        f"Google requires hreflang annotations to point directly to canonical URLs."
+                    ),
+                    "url": page["url"],
+                    "noncanonical_targets": noncanonical_targets,
+                }
+            )
+
+
+def summarize_hreflang_audit(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Calculate International SEO & Hreflang Summary statistics from crawled pages."""
+    pages_with_hreflang = sum(1 for p in results if (p.get("hreflang_count") or 0) > 0)
+    all_issues = [
+        issue
+        for page in results
+        for issue in page.get("seo_issues", [])
+        if issue.get("type") in HREFLANG_ISSUE_TYPES
+    ]
+    invalid_hreflang_count = sum(
+        1 for i in all_issues if i.get("type") == "invalid_hreflang"
+    )
+    missing_return_links_count = sum(
+        1 for i in all_issues if i.get("type") == "hreflang_missing_return_link"
+    )
+    uncrawled_targets_count = sum(
+        1 for i in all_issues if i.get("type") == "hreflang_target_not_crawled"
+    )
+    canonical_conflicts_count = sum(
+        1 for i in all_issues if i.get("type") == "hreflang_canonical_conflict"
+    )
+
+    return {
+        "pages_with_hreflang_count": pages_with_hreflang,
+        "invalid_hreflang_count": invalid_hreflang_count,
+        "missing_return_links_count": missing_return_links_count,
+        "uncrawled_targets_count": uncrawled_targets_count,
+        "canonical_conflicts_count": canonical_conflicts_count,
+        "total_hreflang_issues": len(all_issues),
+        "severity_counts": {
+            "error": sum(1 for i in all_issues if i.get("severity") == "error"),
+            "warning": sum(1 for i in all_issues if i.get("severity") == "warning"),
+            "info": sum(1 for i in all_issues if i.get("severity") == "info"),
+        },
+    }
+
+
 def crawl_website(
     start_url: str,
     max_pages: int = 10,
@@ -4827,6 +5353,9 @@ def crawl_website(
                     "outgoing_internal_links": 0,
                     "outgoing_external_links": 0,
                     "external_links": [],
+                    "hreflang_count": 0,
+                    "hreflang_links": [],
+                    "canonical_url": None,
                     "content_type": content_type,
                     "response_time_ms": response_time_ms,
                     "page_size_bytes": page_size_bytes,
@@ -5017,6 +5546,29 @@ def crawl_website(
                 )
             )
             if is_html_content(content_type):
+                hreflang_links = _extract_hreflang_links(
+                    current_url, soup, response.headers
+                )
+                results[-1]["hreflang_count"] = len(hreflang_links)
+                results[-1]["hreflang_links"] = hreflang_links
+                canonical_tags = _find_canonical_link_tags(soup)
+                page_canonical_url = None
+                if canonical_tags:
+                    resolved_can, is_can_valid = _resolve_canonical_url(
+                        current_url, canonical_tags[0].get("href")
+                    )
+                    if is_can_valid:
+                        page_canonical_url = resolved_can
+                results[-1]["canonical_url"] = page_canonical_url
+                seo_issues.extend(
+                    detect_page_hreflang_issues(
+                        url=current_url,
+                        hreflang_links=hreflang_links,
+                        canonical_url=page_canonical_url,
+                        is_https=urlparse(current_url).scheme.lower() == "https",
+                    )
+                )
+
                 ext_links = _extract_external_links(
                     current_url, soup, target_hostname
                 )
@@ -5083,6 +5635,9 @@ def crawl_website(
                     "outgoing_internal_links": 0,
                     "outgoing_external_links": 0,
                     "external_links": [],
+                    "hreflang_count": 0,
+                    "hreflang_links": [],
+                    "canonical_url": None,
                     "content_type": None,
                     "response_time_ms": None,
                     "page_size_bytes": None,
@@ -5111,6 +5666,9 @@ def crawl_website(
                     "outgoing_internal_links": 0,
                     "outgoing_external_links": 0,
                     "external_links": [],
+                    "hreflang_count": 0,
+                    "hreflang_links": [],
+                    "canonical_url": None,
                     "content_type": error.response.headers.get("content-type"),
                     "response_time_ms": response_time_ms,
                     "page_size_bytes": page_size_bytes,
@@ -5169,6 +5727,7 @@ def crawl_website(
         page_external_links=page_external_links,
         verification_results=verification_results,
     )
+    detect_cross_page_hreflang_issues(results)
 
     successful_pages = sum(1 for item in results if item["error"] is None)
     print(

@@ -25,6 +25,7 @@ PAGE = {
     "incoming_internal_links": 0,
     "outgoing_internal_links": 1,
     "outgoing_external_links": 0,
+    "hreflang_count": 0,
     "is_https": True,
     "in_sitemap": True,
     "content_type": "text/html",
