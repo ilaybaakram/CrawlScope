@@ -14,6 +14,8 @@ SAMPLE_PAGE = {
     "h1": "Example Domain",
     "total_links": 1,
     "content_type": "text/html",
+    "response_time_ms": 2300.0,
+    "page_size_bytes": 1572864,
     "seo_issues": [
         {
             "type": "missing_meta_description",
@@ -90,6 +92,14 @@ SAMPLE_PAGE = {
             "message": "Page has thin content (120 words; minimum recommended is 300 words).",
             "url": "https://example.com/",
             "word_count": 120,
+        },
+        {
+            "type": "slow_response",
+            "severity": "warning",
+            "message": "Page response time (2300.0 ms) exceeds the 2.0s threshold.",
+            "url": "https://example.com/",
+            "response_time_ms": 2300.0,
+            "page_size_bytes": 1572864,
         },
     ],
     "error": None,
@@ -169,6 +179,7 @@ class FastAPIEndpointTests(unittest.TestCase):
                 "noindex_page",
                 "duplicate_schema_type",
                 "thin_content",
+                "slow_response",
             ],
         )
         self.assertEqual(
@@ -186,6 +197,14 @@ class FastAPIEndpointTests(unittest.TestCase):
         self.assertEqual(
             data["pages"][0]["seo_issues"][9]["word_count"],
             120,
+        )
+        self.assertEqual(
+            data["pages"][0]["seo_issues"][10]["response_time_ms"],
+            2300.0,
+        )
+        self.assertEqual(
+            data["pages"][0]["seo_issues"][10]["page_size_bytes"],
+            1572864,
         )
         self.assertEqual(
             data["pages"][0]["seo_issues"][6]["canonical_url"],

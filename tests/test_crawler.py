@@ -1906,6 +1906,175 @@ class ContentQualitySeoAuditTests(unittest.TestCase):
         self.assertEqual(page["seo_issues"], [])
 
 
+class PerformanceSeoAuditTests(unittest.TestCase):
+    def build_valid_html(self, target_size_bytes: int | None = None) -> str:
+        prefix = (
+            "<html><head><title>Performance Page</title>"
+            '<meta name="description" content="Performance description">'
+            f'<link rel="canonical" href="{START_URL}">'
+            '<script type="application/ld+json">'
+            '{"@context":"https://schema.org","@type":"WebPage"}'
+            "</script></head>"
+            f"<body><h1>Performance Heading</h1><p>{DEFAULT_BODY_WORDS}</p><!--"
+        )
+        suffix = "--></body></html>"
+        base_len = len((prefix + suffix).encode("utf-8"))
+        if target_size_bytes is None or target_size_bytes <= base_len:
+            return prefix + suffix
+        padding = "x" * (target_size_bytes - base_len)
+        return prefix + padding + suffix
+
+    def crawl_with_performance(
+        self,
+        elapsed_seconds: float = 0.25,
+        target_size_bytes: int | None = None,
+        content_type: str = "text/html; charset=utf-8",
+        crawl_duration_seconds: float | None = None,
+    ):
+        from datetime import timedelta
+
+        html = self.build_valid_html(target_size_bytes=target_size_bytes)
+
+        def fake_get(url, **_):
+            if url.endswith("/robots.txt"):
+                return make_response("GET", url, 200, ROBOTS_TXT)
+            resp = httpx.Response(
+                200,
+                text=html,
+                headers={"content-type": content_type},
+                request=httpx.Request("GET", url),
+            )
+            resp._elapsed = timedelta(seconds=elapsed_seconds)
+            return resp
+
+        perf_values = [0.0, elapsed_seconds]
+        if crawl_duration_seconds is not None:
+            perf_values.append(crawl_duration_seconds)
+        else:
+            perf_values.append(elapsed_seconds)
+
+        perf_iter = iter(perf_values)
+
+        def fake_perf_counter():
+            return next(perf_iter, perf_values[-1])
+
+        with patch("crawler.httpx.get", side_effect=fake_get), \
+             patch("crawler.time.perf_counter", side_effect=fake_perf_counter), \
+             patch("crawler.time.sleep"):
+            pages = crawler.crawl_website(START_URL, max_pages=1, max_depth=0)
+        return pages[0]
+
+    def test_normal_response_time_and_page_size_produce_no_issues(self):
+        page = self.crawl_with_performance(
+            elapsed_seconds=0.45,
+            target_size_bytes=50_000,
+        )
+        self.assertEqual(page["seo_issues"], [])
+        self.assertEqual(page["response_time_ms"], 450.0)
+        self.assertEqual(page["page_size_bytes"], 50_000)
+
+        # Exact threshold boundaries (2.0s and 1 MB) are not flagged
+        boundary_page = self.crawl_with_performance(
+            elapsed_seconds=2.0,
+            target_size_bytes=crawler.LARGE_PAGE_SIZE_THRESHOLD_BYTES,
+        )
+        self.assertEqual(boundary_page["seo_issues"], [])
+        self.assertEqual(boundary_page["response_time_ms"], 2000.0)
+        self.assertEqual(
+            boundary_page["page_size_bytes"],
+            crawler.LARGE_PAGE_SIZE_THRESHOLD_BYTES,
+        )
+
+    def test_slow_response_detected_between_2_and_5_seconds(self):
+        page = self.crawl_with_performance(elapsed_seconds=2.35)
+        self.assertEqual(len(page["seo_issues"]), 1)
+        issue = page["seo_issues"][0]
+        self.assertEqual(issue["type"], "slow_response")
+        self.assertEqual(issue["severity"], "warning")
+        self.assertEqual(issue["url"], START_URL)
+        self.assertEqual(issue["response_time_ms"], 2350.0)
+        self.assertIn("2350.0", issue["message"])
+
+        # Exact 5.0s boundary is still slow_response (not very_slow_response)
+        boundary_5s = self.crawl_with_performance(elapsed_seconds=5.0)
+        self.assertEqual(
+            [i["type"] for i in boundary_5s["seo_issues"]],
+            ["slow_response"],
+        )
+        self.assertEqual(boundary_5s["seo_issues"][0]["response_time_ms"], 5000.0)
+
+    def test_very_slow_response_over_5_seconds_avoids_duplicate_slow_response(self):
+        page = self.crawl_with_performance(elapsed_seconds=5.25)
+        self.assertEqual(len(page["seo_issues"]), 1)
+        issue = page["seo_issues"][0]
+        self.assertEqual(issue["type"], "very_slow_response")
+        self.assertEqual(issue["severity"], "warning")
+        self.assertEqual(issue["url"], START_URL)
+        self.assertEqual(issue["response_time_ms"], 5250.0)
+        self.assertIn("5250.0", issue["message"])
+
+    def test_large_page_size_detected_between_1mb_and_3mb(self):
+        size_over_1mb = crawler.LARGE_PAGE_SIZE_THRESHOLD_BYTES + 1
+        page = self.crawl_with_performance(target_size_bytes=size_over_1mb)
+        self.assertEqual(len(page["seo_issues"]), 1)
+        issue = page["seo_issues"][0]
+        self.assertEqual(issue["type"], "large_page_size")
+        self.assertEqual(issue["severity"], "warning")
+        self.assertEqual(issue["url"], START_URL)
+        self.assertEqual(issue["page_size_bytes"], size_over_1mb)
+
+        # Exact 3 MB boundary is still large_page_size (not very_large_page_size)
+        boundary_3mb = self.crawl_with_performance(
+            target_size_bytes=crawler.VERY_LARGE_PAGE_SIZE_THRESHOLD_BYTES
+        )
+        self.assertEqual(
+            [i["type"] for i in boundary_3mb["seo_issues"]],
+            ["large_page_size"],
+        )
+
+    def test_very_large_page_size_over_3mb_avoids_duplicate_large_page_size(self):
+        size_over_3mb = crawler.VERY_LARGE_PAGE_SIZE_THRESHOLD_BYTES + 1
+        page = self.crawl_with_performance(target_size_bytes=size_over_3mb)
+        self.assertEqual(len(page["seo_issues"]), 1)
+        issue = page["seo_issues"][0]
+        self.assertEqual(issue["type"], "very_large_page_size")
+        self.assertEqual(issue["severity"], "warning")
+        self.assertEqual(issue["url"], START_URL)
+        self.assertEqual(issue["page_size_bytes"], size_over_3mb)
+
+    def test_slow_crawl_informational_issue_when_overall_duration_exceeds_threshold(self):
+        # At or below threshold (30.0s): no slow_crawl issue
+        normal_crawl_page = self.crawl_with_performance(
+            elapsed_seconds=0.5,
+            crawl_duration_seconds=crawler.SLOW_CRAWL_THRESHOLD_SECONDS,
+        )
+        self.assertEqual(normal_crawl_page["seo_issues"], [])
+
+        # Above threshold (> 30.0s): slow_crawl informational issue reported
+        slow_crawl_page = self.crawl_with_performance(
+            elapsed_seconds=0.5,
+            crawl_duration_seconds=34.5,
+        )
+        self.assertEqual(len(slow_crawl_page["seo_issues"]), 1)
+        issue = slow_crawl_page["seo_issues"][0]
+        self.assertEqual(issue["type"], "slow_crawl")
+        self.assertEqual(issue["severity"], "info")
+        self.assertEqual(issue["url"], START_URL)
+        self.assertEqual(issue["crawl_duration_seconds"], 34.5)
+        self.assertIn("34.5s", issue["message"])
+
+    def test_non_html_page_is_excluded_from_html_page_size_audit(self):
+        size_over_3mb = crawler.VERY_LARGE_PAGE_SIZE_THRESHOLD_BYTES + 100
+        page = self.crawl_with_performance(
+            elapsed_seconds=0.5,
+            target_size_bytes=size_over_3mb,
+            content_type="application/json",
+        )
+        self.assertEqual(page["seo_issues"], [])
+        self.assertEqual(page["page_size_bytes"], size_over_3mb)
+        self.assertEqual(page["response_time_ms"], 500.0)
+
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -23,6 +23,8 @@ PAGE = {
     "h1": "Welcome",
     "total_links": 2,
     "content_type": "text/html",
+    "response_time_ms": 125.4,
+    "page_size_bytes": 2048,
     "seo_issues": [],
     "error": None,
 }

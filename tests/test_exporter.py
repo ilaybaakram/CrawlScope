@@ -16,6 +16,8 @@ SAMPLE_PAGES = [
         "h1": "Welcome",
         "total_links": 12,
         "content_type": "text/html; charset=utf-8",
+        "response_time_ms": 140.25,
+        "page_size_bytes": 4096,
         "seo_issues": [],
         "error": None,
     },
@@ -28,6 +30,8 @@ SAMPLE_PAGES = [
         "h1": None,
         "total_links": 0,
         "content_type": "text/html",
+        "response_time_ms": 85.0,
+        "page_size_bytes": 512,
         "seo_issues": [],
         "error": "Client error '404 Not Found'",
     },
@@ -40,6 +44,8 @@ SAMPLE_PAGES = [
         "h1": None,
         "total_links": 3,
         "content_type": "text/html",
+        "response_time_ms": 2450.5,
+        "page_size_bytes": 1572864,
         "seo_issues": [
             {
                 "type": "missing_meta_description",
@@ -127,6 +133,14 @@ SAMPLE_PAGES = [
                 "message": "Page has thin content (120 words; minimum recommended is 300 words).",
                 "url": "https://example.com/café",
                 "word_count": 120,
+            },
+            {
+                "type": "slow_response",
+                "severity": "warning",
+                "message": "Page response time (2450.5 ms) exceeds the 2.0s threshold.",
+                "url": "https://example.com/café",
+                "response_time_ms": 2450.5,
+                "page_size_bytes": 1572864,
             },
         ],
         "error": None,
@@ -251,7 +265,7 @@ class PageExportTests(ExporterTestCase):
         self.assertIn("seo_issues", rows[0])
         self.assertEqual(json.loads(rows[0]["seo_issues"]), [])
         parsed_issues = json.loads(rows[2]["seo_issues"])
-        self.assertEqual(len(parsed_issues), 11)
+        self.assertEqual(len(parsed_issues), 12)
         self.assertEqual(parsed_issues[0]["type"], "missing_meta_description")
         self.assertEqual(parsed_issues[2]["type"], "duplicate_title")
         self.assertEqual(parsed_issues[3]["type"], "missing_image_alt")
@@ -289,6 +303,9 @@ class PageExportTests(ExporterTestCase):
         )
         self.assertEqual(parsed_issues[10]["type"], "thin_content")
         self.assertEqual(parsed_issues[10]["word_count"], 120)
+        self.assertEqual(parsed_issues[11]["type"], "slow_response")
+        self.assertEqual(parsed_issues[11]["response_time_ms"], 2450.5)
+        self.assertEqual(parsed_issues[11]["page_size_bytes"], 1572864)
 
         json_data = read_json(json_path)
         self.assertEqual(json_data[2]["seo_issues"], SAMPLE_PAGES[2]["seo_issues"])

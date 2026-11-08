@@ -13,11 +13,26 @@ const PAGE_FIELDS = [
   "h1",
   "total_links",
   "content_type",
+  "response_time_ms",
+  "page_size_bytes",
   "seo_issues",
   "error",
 ];
 
 const LINK_FIELDS = ["url", "found_on", "status_code", "result", "error"];
+
+function formatByteSize(bytes) {
+  if (bytes === null || bytes === undefined) {
+    return "—";
+  }
+  if (bytes >= 1024 * 1024) {
+    return `${(bytes / (1024 * 1024)).toFixed(2)} MB (${bytes} B)`;
+  }
+  if (bytes >= 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB (${bytes} B)`;
+  }
+  return `${bytes} B`;
+}
 
 function escapeCsvCell(value) {
   if (value === null || value === undefined) {
@@ -385,6 +400,8 @@ function App() {
                   <th>H1</th>
                   <th>Meta Description</th>
                   <th>Links</th>
+                  <th>Response Time</th>
+                  <th>Page Size</th>
                   <th>Content-Type</th>
                 </tr>
               </thead>
@@ -416,6 +433,13 @@ function App() {
                     <td>{page.h1 || "—"}</td>
                     <td>{page.meta_description || "—"}</td>
                     <td>{page.total_links ?? 0}</td>
+                    <td>
+                      {page.response_time_ms !== undefined &&
+                      page.response_time_ms !== null
+                        ? `${page.response_time_ms} ms`
+                        : "—"}
+                    </td>
+                    <td>{formatByteSize(page.page_size_bytes)}</td>
                     <td>
                       {page.content_type || (page.error ? page.error : "—")}
                     </td>
@@ -457,6 +481,8 @@ function App() {
                   <th>Robots Directive</th>
                   <th>Schema Types</th>
                   <th>Word Count</th>
+                  <th>Response Time</th>
+                  <th>Page Size</th>
                   <th>Source URL</th>
                   <th>Destination URL</th>
                   <th>Redirect Chain</th>
@@ -468,7 +494,7 @@ function App() {
               <tbody>
                 {seoIssues.map((issue) => (
                   <tr
-                    key={`${issue.url}-${issue.type}-${issue.canonical_url || ""}-${issue.robots_directive || ""}-${issue.directive_source || ""}-${Array.isArray(issue.schema_types) ? issue.schema_types.join(",") : ""}-${issue.word_count ?? ""}-${issue.image_url || ""}-${issue.source_url || ""}`}
+                    key={`${issue.url}-${issue.type}-${issue.canonical_url || ""}-${issue.robots_directive || ""}-${issue.directive_source || ""}-${Array.isArray(issue.schema_types) ? issue.schema_types.join(",") : ""}-${issue.word_count ?? ""}-${issue.response_time_ms ?? ""}-${issue.page_size_bytes ?? ""}-${issue.image_url || ""}-${issue.source_url || ""}`}
                   >
                     <td className="url-cell">
                       <a
@@ -534,6 +560,13 @@ function App() {
                         ? issue.word_count
                         : "—"}
                     </td>
+                    <td>
+                      {issue.response_time_ms !== undefined &&
+                      issue.response_time_ms !== null
+                        ? `${issue.response_time_ms} ms`
+                        : "—"}
+                    </td>
+                    <td>{formatByteSize(issue.page_size_bytes)}</td>
                     <td className="url-cell">
                       {issue.source_url ? (
                         <a

@@ -13,6 +13,8 @@ PAGE_FIELDS = [
     "h1",
     "total_links",
     "content_type",
+    "response_time_ms",
+    "page_size_bytes",
     "seo_issues",
     "error",
 ]

@@ -1410,6 +1410,145 @@ def detect_duplicate_content_issues(
             )
 
 
+SLOW_RESPONSE_THRESHOLD_SECONDS = 2.0
+VERY_SLOW_RESPONSE_THRESHOLD_SECONDS = 5.0
+LARGE_PAGE_SIZE_THRESHOLD_BYTES = 1 * 1024 * 1024  # 1 MB (1,048,576 bytes)
+VERY_LARGE_PAGE_SIZE_THRESHOLD_BYTES = 3 * 1024 * 1024  # 3 MB (3,145,728 bytes)
+# Overall crawl duration threshold (in seconds) for reporting an informational
+# slow_crawl insight. A default 10-page crawl with a 1s delay typically finishes
+# within 10-15s; exceeding 30s signals slow server responses or heavy checks.
+SLOW_CRAWL_THRESHOLD_SECONDS = 30.0
+
+
+def _extract_response_time_seconds(
+    response: httpx.Response,
+    measured_elapsed_seconds: float,
+) -> float:
+    raw_elapsed = getattr(response, "_elapsed", None)
+    if raw_elapsed is not None and hasattr(raw_elapsed, "total_seconds"):
+        return max(0.0, float(raw_elapsed.total_seconds()))
+    return max(0.0, float(measured_elapsed_seconds))
+
+
+def detect_performance_seo_issues(
+    url: str,
+    content_type: str | None,
+    response_time_seconds: float,
+    page_size_bytes: int,
+    slow_response_threshold: float = SLOW_RESPONSE_THRESHOLD_SECONDS,
+    very_slow_response_threshold: float = VERY_SLOW_RESPONSE_THRESHOLD_SECONDS,
+    large_page_size_threshold: int = LARGE_PAGE_SIZE_THRESHOLD_BYTES,
+    very_large_page_size_threshold: int = VERY_LARGE_PAGE_SIZE_THRESHOLD_BYTES,
+) -> list[dict[str, Any]]:
+    if not is_html_content(content_type):
+        return []
+
+    issues: list[dict[str, Any]] = []
+    response_time_ms = round(response_time_seconds * 1000, 2)
+
+    if response_time_seconds > very_slow_response_threshold:
+        issues.append(
+            {
+                "type": "very_slow_response",
+                "severity": "warning",
+                "message": (
+                    f"Page response time ({response_time_ms} ms) exceeds the "
+                    f"{very_slow_response_threshold}s threshold."
+                ),
+                "url": url,
+                "response_time_ms": response_time_ms,
+                "page_size_bytes": page_size_bytes,
+            }
+        )
+    elif response_time_seconds > slow_response_threshold:
+        issues.append(
+            {
+                "type": "slow_response",
+                "severity": "warning",
+                "message": (
+                    f"Page response time ({response_time_ms} ms) exceeds the "
+                    f"{slow_response_threshold}s threshold."
+                ),
+                "url": url,
+                "response_time_ms": response_time_ms,
+                "page_size_bytes": page_size_bytes,
+            }
+        )
+
+    if page_size_bytes > very_large_page_size_threshold:
+        issues.append(
+            {
+                "type": "very_large_page_size",
+                "severity": "warning",
+                "message": (
+                    f"HTML response body size ({page_size_bytes} bytes) "
+                    "exceeds the 3 MB "
+                    f"({very_large_page_size_threshold} bytes) threshold."
+                ),
+                "url": url,
+                "response_time_ms": response_time_ms,
+                "page_size_bytes": page_size_bytes,
+            }
+        )
+    elif page_size_bytes > large_page_size_threshold:
+        issues.append(
+            {
+                "type": "large_page_size",
+                "severity": "warning",
+                "message": (
+                    f"HTML response body size ({page_size_bytes} bytes) "
+                    "exceeds the 1 MB "
+                    f"({large_page_size_threshold} bytes) threshold."
+                ),
+                "url": url,
+                "response_time_ms": response_time_ms,
+                "page_size_bytes": page_size_bytes,
+            }
+        )
+
+    return issues
+
+
+def detect_slow_crawl_issue(
+    results: list[dict[str, Any]],
+    crawl_duration_seconds: float,
+    threshold_seconds: float = SLOW_CRAWL_THRESHOLD_SECONDS,
+) -> None:
+    if crawl_duration_seconds <= threshold_seconds or not results:
+        return
+
+    target_page = next(
+        (
+            page
+            for page in results
+            if page.get("error") is None
+            and is_html_content(page.get("content_type"))
+        ),
+        results[0],
+    )
+    seo_issues = target_page.setdefault("seo_issues", [])
+    existing_types = {issue["type"] for issue in seo_issues}
+    if "slow_crawl" in existing_types:
+        return
+
+    rounded_duration = round(crawl_duration_seconds, 2)
+    duration_ms = round(crawl_duration_seconds * 1000, 2)
+    seo_issues.append(
+        {
+            "type": "slow_crawl",
+            "severity": "info",
+            "message": (
+                f"Overall crawl duration ({rounded_duration}s) exceeded the "
+                f"{threshold_seconds}s threshold across {len(results)} page(s)."
+            ),
+            "url": target_page["url"],
+            "crawl_duration_seconds": rounded_duration,
+            "response_time_ms": duration_ms,
+            "page_size_bytes": target_page.get("page_size_bytes"),
+        }
+    )
+
+
 def normalize_metadata_value(
     value: str | None,
     is_title: bool = False,
@@ -1505,6 +1644,7 @@ def crawl_website(
     initial_link_hops: dict[str, tuple[int | None, str | None, str | None]] = {}
     checked_redirects: dict[str, dict[str, Any] | None] = {}
     page_contents: dict[str, tuple[str | None, int]] = {}
+    crawl_start_time = time.perf_counter()
 
     parsed_start_url = urlparse(clean_start_url)
     target_hostname = parsed_start_url.hostname
@@ -1552,7 +1692,14 @@ def crawl_website(
         pages_crawled += 1
 
         try:
+            request_start_time = time.perf_counter()
             response = httpx.get(current_url, headers=headers, timeout=10.0)
+            measured_elapsed = time.perf_counter() - request_start_time
+            response_time_seconds = _extract_response_time_seconds(
+                response, measured_elapsed
+            )
+            response_time_ms = round(response_time_seconds * 1000, 2)
+            page_size_bytes = len(response.content)
             response.raise_for_status()
 
             soup = BeautifulSoup(response.text, "html.parser")
@@ -1621,6 +1768,8 @@ def crawl_website(
                     "h1": h1_heading,
                     "total_links": total_links,
                     "content_type": content_type,
+                    "response_time_ms": response_time_ms,
+                    "page_size_bytes": page_size_bytes,
                     "seo_issues": seo_issues,
                     "error": None,
                 }
@@ -1803,6 +1952,14 @@ def crawl_website(
                         visible_text=visible_text,
                     )
                 )
+            seo_issues.extend(
+                detect_performance_seo_issues(
+                    url=current_url,
+                    content_type=content_type,
+                    response_time_seconds=response_time_seconds,
+                    page_size_bytes=page_size_bytes,
+                )
+            )
 
         except httpx.RequestError as error:
             results.append(
@@ -1815,6 +1972,8 @@ def crawl_website(
                     "h1": None,
                     "total_links": 0,
                     "content_type": None,
+                    "response_time_ms": None,
+                    "page_size_bytes": None,
                     "seo_issues": [],
                     "error": str(error),
                 }
@@ -1835,6 +1994,8 @@ def crawl_website(
                     "h1": None,
                     "total_links": 0,
                     "content_type": error.response.headers.get("content-type"),
+                    "response_time_ms": response_time_ms,
+                    "page_size_bytes": page_size_bytes,
                     "seo_issues": [],
                     "error": str(error),
                 }
@@ -1847,6 +2008,12 @@ def crawl_website(
 
     detect_duplicate_seo_issues(results)
     detect_duplicate_content_issues(results, page_contents)
+    measured_crawl_duration = max(0.0, time.perf_counter() - crawl_start_time)
+    summed_page_seconds = sum(
+        (page.get("response_time_ms") or 0.0) / 1000.0 for page in results
+    )
+    total_crawl_duration = max(measured_crawl_duration, summed_page_seconds)
+    detect_slow_crawl_issue(results, total_crawl_duration)
 
     successful_pages = sum(1 for item in results if item["error"] is None)
     print(
